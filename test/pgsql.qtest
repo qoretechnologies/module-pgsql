@@ -11,6 +11,10 @@
 %requires pgsql
 
 %modern
+
+# bind value conversion has to resolve these; see indirectReferencesTest()
+%allow-weak-references
+%allow-opaque-references
 %exec-class PgsqlTest
 
 class PgsqlTest inherits QUnit::Test {
@@ -238,6 +242,7 @@ class PgsqlTest inherits QUnit::Test {
         addTestCase("geometric types test", \geometricTypesTest());
         addTestCase("network types test", \networkTypesTest());
         addTestCase("array binding test", \arrayBindingTest());
+        addTestCase("indirect references test", \indirectReferencesTest());
         addTestCase("prepared statement test", \preparedStatementTest());
         addTestCase("corner cases test", \cornerCasesTest());
         addTestCase("negative tests", \negativeTests());
@@ -599,6 +604,43 @@ class PgsqlTest inherits QUnit::Test {
         db.exec("insert into network_test (inet_f) values ('::1/128')");
         row = db.selectRow("select inet_f from network_test where inet_f = '::1/128'::inet");
         assertEq("0:0:0:0:0:0:0:1/128", row.inet_f);
+    }
+
+    #! A bind argument list element holding a weak or opaque reference must bind as its target
+    /** QorePgsqlPreparedStatement::exec() retains the list handed to bindArgs() and walks it itself
+        when rebinding, so an element assigned with ":=" or "@=" is what the iterator yields rather
+        than its target.  Without QoreValue::resolveIndirect() in QorePgsqlStatement::add(), that
+        element reaches the default case: a weak reference fails with "don't know how to bind type
+        'weak list reference'", and an opaque one reports its target's type while yielding a null
+        node, which crashed the driver.
+    */
+    private indirectReferencesTest() {
+        Datasource db(connstr);
+        on_exit db.rollback();
+
+        list<auto> arr = (1, 2, 3);
+
+        # exec() twice: the second takes the rebind path that walks the retained argument list
+        code bind_and_read = auto sub (list<auto> args) {
+            SQLStatement stmt(db);
+            on_exit stmt.close();
+            stmt.prepare("select %v::int[] as v");
+            stmt.bindArgs(args);
+            stmt.exec();
+            stmt.exec();
+            stmt.next();
+            return stmt.fetchRow().v;
+        };
+
+        assertEq(arr, bind_and_read((arr,)), "a plain array argument binds");
+
+        list<auto> weak = ();
+        weak[0] := arr;
+        assertEq(arr, bind_and_read(weak), "a weak reference argument binds as its target");
+
+        list<auto> opaque = ();
+        opaque[0] @= arr;
+        assertEq(arr, bind_and_read(opaque), "an opaque reference argument binds as its target");
     }
 
     private arrayBindingTest() {

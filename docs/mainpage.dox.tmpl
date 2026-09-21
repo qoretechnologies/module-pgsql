@@ -535,6 +535,11 @@ hash: (1 member)
     @section pgsqlreleasenotes Release Notes
 
     @subsection pgsql35 pgsql Driver Version 3.5
+    - fixed binding an argument that holds a weak (\c ":=") or opaque (\c "@=") reference: a
+      prepared statement walks the argument list it was given, so such an element is what the
+      iterator yields rather than its target; a weak reference failed with
+      <tt>don't know how to bind type 'weak list reference'</tt> and an opaque one crashed the
+      driver, even though the target binds normally
     - fixed a heap buffer overflow binding a \c number with more than ~197 decimal digits; the
       binary \c numeric encoder wrote its base-10000 digits into a fixed 50-element array with no
       bound check, which corrupted the heap and made the server reject the value with

@@ -2011,7 +2011,12 @@ static QoreString* build_text_array_literal(const QoreListNode* l, Oid base_oid,
     return result.release();
 }
 
-int QorePgsqlStatement::add(QoreValue v, ExceptionSink *xsink) {
+int QorePgsqlStatement::add(QoreValue v_arg, ExceptionSink *xsink) {
+    // The bind arguments arrive as elements of a list, and a member assigned with the weak
+    // reference operator ":=" or the opaque reference operator "@=" is stored as the
+    // reference itself, so reading the list yields that rather than its target.  Resolve it
+    // before dispatching on the type, or the value binds as the wrong type or not at all.
+    QoreValue v = v_arg.resolveIndirect();
     parambuf* pb = new parambuf();
     parambuf_list.push_back(pb);
 
@@ -2717,7 +2722,9 @@ int QorePGBindArray::process_list(const QoreListNode* l, int current, const Qore
     ConstListIterator li(l);
     while (li.next()) {
         qore_type_t ntype;
-        QoreValue n = li.getValue();
+        // see QorePgsqlStatement::add(): an array element may be stored as a weak or opaque
+        // reference, and the iterator yields what the list holds
+        QoreValue n = li.getValue().resolveIndirect();
         ntype = n.getType();
         if (type == NT_LIST) {
             const QoreListNode* l = n.get<const QoreListNode>();
