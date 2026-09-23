@@ -561,6 +561,7 @@ hash: (1 member)
       blocks, aborts cleanly on observer refusal or overrun, and drains the server result on every end
       path so the connection can be reused after rollback
     - the raw <tt>COPY ... FROM STDIN</tt> SQL detection path remains supported unchanged
+    - removed the autotools build; the module is now built with CMake only
 
     @subsection pgsql34 pgsql Driver Version 3.4
     - \c COPY \c FROM \c STDIN operations now report bounded stream boundaries to a datasource

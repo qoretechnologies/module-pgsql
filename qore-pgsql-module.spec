@@ -105,6 +105,7 @@ This RPM provides API documentation, test and example programs
 * Sat Aug 08 2026 David Nichols <david@qore.org> 3.5.0
 - added the driver-neutral native bulk-load protocol using PostgreSQL COPY FROM STDIN
 - added opt-in BulkSqlUtil native COPY support with block-level stream reporting
+- removed autotools build support; the module is built with CMake only
 
 * Mon Mar 30 2026 David Nichols <david@qore.org> 3.4.0
 - added pgvector extension type support (vector, halfvec, sparsevec)

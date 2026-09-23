@@ -70,11 +70,10 @@ See COPYING.MIT and COPYING.LGPL for details on the open-source licenses.
 BUILD AND INSTALL
 -----------------
 
-PostgreSQL DBI module requires PostgreSQL 8+ client libraries and headers.
-If your PostgreSQL libraries are in a non-standard location you can use the
---with-pgsql configure option or set the PGSQL_DIR environment variable.
-
-Using CMake (recommended):
+PostgreSQL DBI module requires PostgreSQL 8+ client libraries and headers and
+is built with CMake.  If your PostgreSQL libraries are in a non-standard
+location, set the PostgreSQL_INCLUDE_DIR, PostgreSQL_TYPE_INCLUDE_DIR, and
+PostgreSQL_LIBRARY environment variables (or pass them as -D options to cmake).
 
   mkdir build
   cd build
@@ -82,31 +81,12 @@ Using CMake (recommended):
   make
   sudo make install
 
-Using autotools:
+The install prefix should match the prefix where Qore is installed; for
+example, if qore is /usr/bin/qore, use -DCMAKE_INSTALL_PREFIX=/usr.
 
-  ./configure
-  make
-  sudo make install
+To build the API documentation (requires doxygen):
 
-The configure script will find out where your qore module directory is found
-and set this for the install directory.
-
-
-BUILD FROM GIT
---------------
-
-For autotools:
-  ./reconf.sh
-  ./configure
-  make
-  sudo make install
-
-For CMake:
-  mkdir build
-  cd build
-  cmake ..
-  make
-  sudo make install
+  make docs
 
 
 RUNNING TESTS
