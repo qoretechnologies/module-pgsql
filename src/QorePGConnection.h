@@ -28,6 +28,7 @@
 #include <qore/QoreSandboxManager.h>
 
 #include <atomic>
+#include <climits>
 #include <vector>
 #include <string>
 
@@ -401,6 +402,7 @@ static inline void assign_point(Point &p, Point *raw) {
 #define PGSQL_OPT_KEEPALIVES_INTERVAL "keepalives-interval"
 #define PGSQL_OPT_KEEPALIVES_COUNT    "keepalives-count"
 #define PGSQL_OPT_CONNECT_TIMEOUT     "connect-timeout"
+#define PGSQL_OPT_TCP_USER_TIMEOUT    "tcp-user-timeout"
 #define PGSQL_OPT_APPLICATION_NAME    "application-name"
 
 // connection option defaults: TCP keepalives are enabled with an aggressive idle time so that
@@ -411,6 +413,13 @@ static inline void assign_point(Point &p, Point *raw) {
 #define PGSQL_DEF_KEEPALIVES_INTERVAL 10
 #define PGSQL_DEF_KEEPALIVES_COUNT    3
 #define PGSQL_DEF_CONNECT_TIMEOUT     0   // 0 = use the libpq default (no client-side connect timeout)
+// maximum time in milliseconds that transmitted data may remain unacknowledged before the connection
+// is closed (TCP_USER_TIMEOUT); keepalives only probe idle connections, so without this a query in
+// flight when the server's host disappears silently blocks until the kernel's retransmission limit
+// (about 15 minutes with the Linux default net.ipv4.tcp_retries2 = 15)
+#define PGSQL_DEF_TCP_USER_TIMEOUT    30000
+// first libpq version supporting the tcp_user_timeout connection parameter (PostgreSQL 12)
+#define PGSQL_TCP_USER_TIMEOUT_MIN_LIBPQ 120000
 
 //! RAII helper for PostgreSQL query cancellation
 /** Registers a cancel callback with the sandbox manager before blocking operations.
@@ -448,6 +457,10 @@ protected:
     int opt_keepalives_interval = PGSQL_DEF_KEEPALIVES_INTERVAL;
     int opt_keepalives_count = PGSQL_DEF_KEEPALIVES_COUNT;
     int opt_connect_timeout = PGSQL_DEF_CONNECT_TIMEOUT;
+    int opt_tcp_user_timeout = PGSQL_DEF_TCP_USER_TIMEOUT;
+    // true if tcp-user-timeout was set explicitly in the datasource options; an explicit value is
+    // always passed to libpq, while the default is omitted when the client library cannot accept it
+    bool opt_tcp_user_timeout_set = false;
     // libpq application_name reported to the server (visible in pg_stat_activity.application_name);
     // empty means unset (libpq default applies)
     std::string opt_application_name;
@@ -551,6 +564,21 @@ public:
         return server_desc.c_str();
     }
 
+    //! validates a tcp-user-timeout option value and stores it in \a out
+    /** @return 0 for success, -1 if the value is out of range (exception raised)
+    */
+    DLLLOCAL static int parseTcpUserTimeoutOption(const QoreValue val, int& out, ExceptionSink* xsink) {
+        int64 v = val.getAsBigInt();
+        if (v < 0 || v > INT_MAX) {
+            xsink->raiseException("DBI:PGSQL-OPTION-ERROR", "invalid '%s' value " QLLD "; expecting a "
+                "number of milliseconds from 0 to %d (0 = use the operating system default)",
+                PGSQL_OPT_TCP_USER_TIMEOUT, v, INT_MAX);
+            return -1;
+        }
+        out = static_cast<int>(v);
+        return 0;
+    }
+
     DLLLOCAL int setOption(const char* opt, const QoreValue val, ExceptionSink* xsink) {
         if (!strcasecmp(opt, DBI_OPT_NUMBER_OPT)) {
             numeric_support = OPT_NUM_OPTIMAL;
@@ -585,6 +613,9 @@ public:
         if (!strcasecmp(opt, PGSQL_OPT_CONNECT_TIMEOUT)) {
             opt_connect_timeout = static_cast<int>(val.getAsBigInt());
             return 0;
+        }
+        if (!strcasecmp(opt, PGSQL_OPT_TCP_USER_TIMEOUT)) {
+            return parseTcpUserTimeoutOption(val, opt_tcp_user_timeout, xsink);
         }
         if (!strcasecmp(opt, PGSQL_OPT_APPLICATION_NAME)) {
             QoreStringValueHelper str(val);
@@ -622,6 +653,8 @@ public:
             return static_cast<int64>(opt_keepalives_count);
         if (!strcasecmp(opt, PGSQL_OPT_CONNECT_TIMEOUT))
             return static_cast<int64>(opt_connect_timeout);
+        if (!strcasecmp(opt, PGSQL_OPT_TCP_USER_TIMEOUT))
+            return static_cast<int64>(opt_tcp_user_timeout);
         if (!strcasecmp(opt, PGSQL_OPT_APPLICATION_NAME))
             return new QoreStringNode(opt_application_name.c_str());
 

@@ -252,6 +252,7 @@ class PgsqlTest inherits QUnit::Test {
         addTestCase("array bind (NT_LIST) test", \arrayBindListTest());
         addTestCase("COPY protocol test", \copyProtocolTest());
         addTestCase("pgvector type test", \pgvectorTest());
+        addTestCase("tcp-user-timeout option test", \tcpUserTimeoutTest());
 
         set_return_value(main());
     }
@@ -544,6 +545,85 @@ class PgsqlTest inherits QUnit::Test {
             assertEq("42P01", arg.alterr);
             assertEq(True, arg.alterr_diag =~ /dalhlhwqsadcnfhe/);
         }
+    }
+
+    private tcpUserTimeoutTest() {
+        # the option is registered with an integer type and a 30-second default
+        {
+            Datasource ds(connstr);
+            ds.open();
+            on_exit ds.close();
+            hash<auto> opt = ds.getOptionHash()."tcp-user-timeout";
+            assertEq("int", opt.type);
+            assertEq(30000, opt.value);
+            assertEq(30000, ds.getOption("tcp-user-timeout"));
+            assertEq(1, ds.selectRow("select 1 as x").x);
+        }
+
+        # explicit values, including 0 (OS default) and the upper bound, are passed to libpq and the
+        # connection works; libpq rejects an unknown conninfo parameter, so a successful query also
+        # shows that tcp_user_timeout was accepted
+        foreach int val in ((0, 1, 7000, 2147483647)) {
+            Datasource ds(sprintf("%s{tcp-user-timeout=%d}", connstr, val));
+            ds.open();
+            on_exit ds.close();
+            assertEq(val, ds.getOption("tcp-user-timeout"), "connstr " + val);
+            assertEq(val, ds.selectRow("select %v::int as x", val).x, "query " + val);
+        }
+
+        # a value set before the connection is opened is applied to it
+        {
+            Datasource ds(connstr);
+            ds.setOption("tcp-user-timeout", 15000);
+            ds.open();
+            on_exit ds.close();
+            assertEq(15000, ds.getOption("tcp-user-timeout"));
+            assertEq(1, ds.selectRow("select 1 as x").x);
+        }
+
+        # a value set on an open datasource is reported immediately and used for the next connection
+        {
+            Datasource ds(connstr);
+            ds.open();
+            on_exit ds.close();
+            ds.setOption("tcp-user-timeout", 5000);
+            assertEq(5000, ds.getOption("tcp-user-timeout"));
+            ds.close();
+            ds.open();
+            assertEq(5000, ds.getOption("tcp-user-timeout"));
+            assertEq(1, ds.selectRow("select 1 as x").x);
+
+            # an invalid value is rejected and leaves the current value in place
+            assertThrows("DBI:PGSQL-OPTION-ERROR", "invalid 'tcp-user-timeout' value -1",
+                \ds.setOption(), ("tcp-user-timeout", -1));
+            assertThrows("DBI:PGSQL-OPTION-ERROR", "invalid 'tcp-user-timeout' value 2147483648",
+                \ds.setOption(), ("tcp-user-timeout", 2147483648));
+            assertEq(5000, ds.getOption("tcp-user-timeout"));
+            assertEq(1, ds.selectRow("select 1 as x").x);
+        }
+
+        # out-of-range values in the configuration fail the open instead of being truncated
+        foreach int val in ((-1, -5000, 2147483648, 99999999999)) {
+            Datasource ds(connstr);
+            ds.setOption("tcp-user-timeout", val);
+            assertThrows("DBI:PGSQL-OPTION-ERROR", "invalid 'tcp-user-timeout' value " + val, \ds.open());
+            # the datasource remains closed, so its options cannot be read with getOption()
+            assertThrows("DATASOURCE-ERROR", \ds.getOption(), "tcp-user-timeout");
+        }
+        {
+            Datasource ds(connstr + "{tcp-user-timeout=-5}");
+            assertThrows("DBI:PGSQL-OPTION-ERROR", "invalid 'tcp-user-timeout' value -5", \ds.open());
+        }
+
+        # the option applies to every connection in a pool
+        {
+            DatasourcePool pool(connstr + "{tcp-user-timeout=10000}");
+            assertEq(10000, pool.getOption("tcp-user-timeout"));
+            assertEq(1, pool.selectRow("select 1 as x").x);
+        }
+        # the pool opens its minimum connections in the constructor, so an invalid value fails there
+        assertThrows("DBI:PGSQL-OPTION-ERROR", "invalid 'tcp-user-timeout' value -1",
+            sub () { DatasourcePool pool(connstr + "{tcp-user-timeout=-1}"); });
     }
 
     private geometricTypesTest() {

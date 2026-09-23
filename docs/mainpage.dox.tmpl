@@ -88,6 +88,7 @@ major_version * 10000 + minor_version * 100 + sub_version
     - \c "keepalives-interval": an integer option (default: \c 10) giving the number of seconds between TCP keepalive probes after the first (libpq \c keepalives_interval)
     - \c "keepalives-count": an integer option (default: \c 3) giving the number of unacknowledged TCP keepalive probes after which the connection is considered dead (libpq \c keepalives_count)
     - \c "connect-timeout": an integer option (default: \c 0) giving the maximum time in seconds to wait when establishing a connection (libpq \c connect_timeout); \c 0 uses the libpq default (no client-side limit)
+    - \c "tcp-user-timeout": an integer option (default: \c 30000) giving the maximum time in milliseconds that transmitted data may remain unacknowledged before the connection is closed (libpq \c tcp_user_timeout, the \c TCP_USER_TIMEOUT socket option); this bounds how long a query in flight blocks when the server's host disappears without closing the connection; \c 0 uses the operating-system default; see @ref pgsql_connection_options
     - \c "application-name": a string option (unset by default) giving an application name reported to the server and shown in \c pg_stat_activity.application_name (libpq \c application_name); useful for identifying which client or connection pool owns each backend
 
     Options can be set in the \c Datasource or \c DatasourcePool constructors as in the following examples:
@@ -95,15 +96,22 @@ major_version * 10000 + minor_version * 100 + sub_version
     Dataource ds("pgsql:user/pass@db{numeric-numbers,timezone=Europe/Vienna}");
     DataourcePool dsp("pgsql:user/pass@db%host.internal:5432{optimal-numbers}");
     DataourcePool dsp2("pgsql:user/pass@db%host.internal:5432{keepalives-idle=30,connect-timeout=20}");
+    DataourcePool dsp3("pgsql:user/pass@db%host.internal:5432{tcp-user-timeout=15000}");
     @endcode
 
     Options are stored separately for each connection.
 
     @subsection pgsql_connection_options Connection Options
 
-    The connection options (\c "keepalives", \c "keepalives-idle", \c "keepalives-interval", \c "keepalives-count", \c "connect-timeout", and \c "application-name") are applied to the underlying \c libpq connection when it is established, so changing them on an already-open \c Datasource or \c DatasourcePool takes effect on the next connection.
+    The connection options (\c "keepalives", \c "keepalives-idle", \c "keepalives-interval", \c "keepalives-count", \c "connect-timeout", \c "tcp-user-timeout", and \c "application-name") are applied to the underlying \c libpq connection when it is established, so changing them on an already-open \c Datasource or \c DatasourcePool takes effect on the next connection.
 
     TCP keepalives are enabled by default with an aggressive idle time (\c 60 seconds) so that the PostgreSQL server promptly detects and reaps backends left behind by an unclean client exit (for example, a client process killed with \c SIGKILL).  Without client-side keepalives, such orphaned backends remain idle on the server until the operating system's default keepalive timeout (often 2 hours), which can accumulate and exhaust the server's \c max_connections.  Set \c "keepalives" to @ref False to restore the previous behavior of relying solely on the operating-system defaults.
+
+    TCP keepalives only probe an idle connection.  Once a query has been sent and its data has not been acknowledged, the kernel's retransmission timeout applies instead and keepalive probes are never sent.  When the server's host disappears without closing the connection (it loses power, the network is partitioned, or a NIC fails, so no TCP reset arrives), a query in flight therefore blocks until the kernel gives up retransmitting, which takes about 15 minutes with the Linux default <tt>net.ipv4.tcp_retries2 = 15</tt>.  During that time the calling thread holds the datasource and any transaction lock on it.  The \c "tcp-user-timeout" option bounds this: it sets the maximum time in milliseconds that transmitted data may remain unacknowledged before the connection is closed, which the driver then handles like any other lost connection.  The default of \c 30000 (30 seconds) means a dead peer is detected in bounded time whether the connection is idle (keepalives) or busy (\c "tcp-user-timeout"); both are needed.
+
+    The timeout only counts time during which sent data is unacknowledged.  A live server acknowledges data at the TCP level even while it is busy running a long statement that returns nothing, so a long-running query on a healthy connection is not affected.  It can, however, close a connection during a network outage that would otherwise have recovered, so choose a value longer than any interruption the connection should survive.  When set together with keepalives, Linux also uses this timeout rather than \c "keepalives-count" to decide when an unanswered keepalive probe closes an idle connection.  Set \c "tcp-user-timeout" to \c 0 to use the operating-system default.
+
+    The \c "tcp-user-timeout" option requires \c libpq from PostgreSQL 12 or later and has an effect only on platforms that support the \c TCP_USER_TIMEOUT socket option (such as Linux), and not on Unix-domain socket connections.  With an older \c libpq, the default is not applied, and an explicitly configured value makes the connection fail with the \c libpq error <tt>invalid connection option "tcp_user_timeout"</tt>.  A negative value or one larger than \c 2147483647 raises a \c DBI:PGSQL-OPTION-ERROR exception.
 
     The \c "application-name" option sets the \c application_name reported to the server, which appears in the \c application_name column of \c pg_stat_activity and in server log lines.  Setting a distinct value per client process or connection pool makes it possible to identify which client owns each backend connection when diagnosing connection usage or exhaustion.  The value is wrapped and escaped automatically, so names containing spaces are accepted.
 
@@ -535,6 +543,12 @@ hash: (1 member)
     @section pgsqlreleasenotes Release Notes
 
     @subsection pgsql35 pgsql Driver Version 3.5
+    - added the settable \c "tcp-user-timeout" connection option (libpq \c tcp_user_timeout), enabled
+      by default with a 30-second limit; a query in flight when the server's host disappears without
+      closing the connection now fails once its data has gone unacknowledged for that long, instead
+      of blocking for about 15 minutes until the kernel's retransmission limit; keepalives do not
+      cover this case because they only probe idle connections
+      (see @ref pgsql_connection_options)
     - fixed binding an argument that holds a weak (\c ":=") or opaque (\c "@=") reference: a
       prepared statement walks the argument list it was given, so such an element is what the
       iterator yields rather than its target; a weak reference failed with

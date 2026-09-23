@@ -3004,6 +3004,16 @@ static void custom_notice_processor(void* ptr, const char* message) {
     }
 }
 
+// returns true if the libpq client library in use accepts the tcp_user_timeout connection parameter
+static bool pgsql_libpq_has_tcp_user_timeout() {
+#ifdef HAVE_PQLIBVERSION
+    return PQlibVersion() >= PGSQL_TCP_USER_TIMEOUT_MIN_LIBPQ;
+#else
+    // PQlibVersion() was added in PostgreSQL 9.1, so this library predates tcp_user_timeout
+    return false;
+#endif
+}
+
 QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink *xsink)
         : ds(d), pc(nullptr), server_tz(currentTZ()),
             server_desc("%s:", d->getDriverName()),
@@ -3031,6 +3041,13 @@ QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink
             v = opths->getKeyValue(PGSQL_OPT_CONNECT_TIMEOUT);
             if (!v.isNothing())
                 opt_connect_timeout = static_cast<int>(v.getAsBigInt());
+            v = opths->getKeyValue(PGSQL_OPT_TCP_USER_TIMEOUT);
+            if (!v.isNothing()) {
+                if (parseTcpUserTimeoutOption(v, opt_tcp_user_timeout, xsink)) {
+                    return;
+                }
+                opt_tcp_user_timeout_set = true;
+            }
             v = opths->getKeyValue(PGSQL_OPT_APPLICATION_NAME);
             if (!v.isNothing()) {
                 QoreStringValueHelper str(v);
@@ -3055,6 +3072,15 @@ QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink
     }
     if (opt_connect_timeout > 0)
         conninfo.sprintf(" connect_timeout=%d", opt_connect_timeout);
+    // bound the time transmitted data may remain unacknowledged (TCP_USER_TIMEOUT); keepalives only
+    // probe idle connections, so without this a query in flight when the server's host disappears
+    // silently (no RST) blocks until the kernel's retransmission limit (~15 minutes on Linux).
+    // libpq accepts tcp_user_timeout only from PostgreSQL 12 and fails the connection with "invalid
+    // connection option" otherwise, so the default is omitted with an older client library, while an
+    // explicitly-set value is always passed so that libpq reports the problem
+    if (opt_tcp_user_timeout > 0 && (opt_tcp_user_timeout_set || pgsql_libpq_has_tcp_user_timeout())) {
+        conninfo.sprintf(" tcp_user_timeout=%d", opt_tcp_user_timeout);
+    }
     // report an application_name to the server (visible in pg_stat_activity.application_name) so the
     // owning client/pool of each backend can be identified; libpq conninfo quoting requires the value
     // to be single-quoted with any embedded backslash or single-quote backslash-escaped
