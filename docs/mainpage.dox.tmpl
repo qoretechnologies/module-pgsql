@@ -543,6 +543,8 @@ hash: (1 member)
     @section pgsqlreleasenotes Release Notes
 
     @subsection pgsql35 pgsql Driver Version 3.5
+    - fixed pgvector test setup on fresh databases by installing the extension before
+      opening the connection that discovers and tests its types
     - added the settable \c "tcp-user-timeout" connection option (libpq \c tcp_user_timeout), enabled
       by default with a 30-second limit; a query in flight when the server's host disappears without
       closing the connection now fails once its data has gone unacknowledged for that long, instead

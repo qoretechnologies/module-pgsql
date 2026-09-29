@@ -8,3 +8,15 @@ docs/pgsql/
 build/
 build-debug/
 build-qore-branch/
+
+# Debian package build products
+/obj-*/
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper
+/debian/qore-pgsql-module/
+/debian/qore-pgsql-module-doc/
+/debian/tmp/
+**/__pycache__/

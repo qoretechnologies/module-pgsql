@@ -1,0 +1,11 @@
+#!/bin/sh
+# Copyright (C) 2026 David Nichols
+# SPDX-License-Identifier: MIT
+set -eu
+test -n "$QORE_DB_CONNSTR_PGSQL"
+module=${QORE_PGSQL_BINARY_MODULE:-pgsql}
+# Fail before the suites if the driver cannot reach the disposable database.
+/usr/bin/qore -l "$module" -e 'Datasource db(ENV.QORE_DB_CONNSTR_PGSQL); db.open(); db.close();'
+for suite in "$1"/*.qtest; do
+    timeout 180 /usr/bin/qore -l "$module" "$suite" -v
+done

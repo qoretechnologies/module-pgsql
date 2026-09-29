@@ -1,0 +1,2 @@
+usr/lib/*/qore-modules/pgsql-api-*.qmod
+usr/share/qore/metadata/pgsql/*.meta.json

@@ -1,0 +1,40 @@
+Source: qore-pgsql-module
+Section: interpreters
+Priority: optional
+Maintainer: David Nichols <david@qore.org>
+Build-Depends: debhelper-compat (= 13),
+               cmake (>= 3.5),
+               libqore-dev (>= 3.0.0~),
+               qore (>= 3.0.0~),
+               libpq-dev,
+               postgresql <!nocheck>,
+               postgresql-common <!nocheck>
+Build-Depends-Indep: doxygen <!nodoc>
+Standards-Version: 4.7.4
+Rules-Requires-Root: no
+Homepage: https://qore.org
+Vcs-Git: https://github.com/qoretechnologies/module-pgsql.git
+Vcs-Browser: https://github.com/qoretechnologies/module-pgsql
+
+Package: qore-pgsql-module
+Architecture: any
+Depends: ${qore:Depends},
+         ${shlibs:Depends},
+         ${misc:Depends}
+Suggests: qore-pgsql-module-doc
+Description: PostgreSQL database driver for Qore
+ This module connects Qore's DBI API to PostgreSQL, including prepared
+ statements, transactions, arrays, binary data, COPY and native bulk loading.
+ It uses the distribution libpq client library to access local or remote
+ PostgreSQL servers. No server is installed by the runtime package.
+
+Package: qore-pgsql-module-doc
+Section: doc
+Architecture: all
+Multi-Arch: foreign
+Build-Profiles: <!nodoc>
+Depends: ${misc:Depends}
+Suggests: qore-pgsql-module
+Description: documentation and examples for Qore's PostgreSQL driver
+ This package contains the HTML API reference and example tests for Qore's
+ PostgreSQL database driver.

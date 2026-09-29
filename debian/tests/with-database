@@ -1,0 +1,12 @@
+#!/bin/sh
+# Copyright (C) 2026 David Nichols
+# SPDX-License-Identifier: MIT
+set -eu
+# pg_virtualenv chooses an unused local port and removes its cluster on exit.
+if [ "${1:-}" != --cluster ]; then
+    exec pg_virtualenv -t "$0" --cluster "$@"
+fi
+shift
+export QORE_DB_CONNSTR_PGSQL="pgsql:${PGUSER}/${PGPASSWORD}@${PGDATABASE}%${PGHOST}:${PGPORT}"
+psql -X -v ON_ERROR_STOP=1 -c 'SELECT 1' > /dev/null
+"$@"

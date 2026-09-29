@@ -1441,22 +1441,26 @@ class PgsqlTest inherits QUnit::Test {
     }
 
     pgvectorTest() {
-        Datasource db(connstr);
-
-        # check if pgvector extension is available
+        # Extension types are discovered when the driver connects. Install the
+        # optional extension before opening the connection whose binds are tested.
         bool has_pgvector;
-        try {
-            db.exec("CREATE EXTENSION IF NOT EXISTS vector");
-            db.commit();
-            has_pgvector = True;
-        } catch (hash<ExceptionInfo> ex) {
-            db.commit();
-            has_pgvector = False;
+        {
+            Datasource setup(connstr);
+            try {
+                setup.exec("CREATE EXTENSION IF NOT EXISTS vector");
+                setup.commit();
+                has_pgvector = True;
+            } catch (hash<ExceptionInfo> ex) {
+                setup.rollback();
+                has_pgvector = False;
+            }
         }
         if (!has_pgvector) {
             testSkip("pgvector extension not available");
             return;
         }
+
+        Datasource db(connstr);
 
         # cleanup from any previous run
         try { db.exec("DROP TABLE IF EXISTS vector_test"); db.commit(); } catch () { db.commit(); }

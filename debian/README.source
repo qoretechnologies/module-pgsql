@@ -1,0 +1,77 @@
+Debian/Ubuntu packaging for the pgsql module
+=============================================
+
+The native DBI driver belongs to qore-pgsql-module.
+HTML documentation and the upstream example tests belong to the optional
+qore-pgsql-module-doc package. Debhelper creates matching debug symbols.
+
+Build prerequisites and supported scope
+--------------------------------------
+
+Use an isolated native build environment containing the packaged Qore runtime
+and libqore-dev, then install the Build-Depends from debian/control. The current
+qualification target is Ubuntu 26.04 amd64 with Qore 3.0 development packages.
+Other Debian/Ubuntu releases and architectures need their own qualified SDK
+and native build/test run. Cross builds are rejected because Qore executes
+during the build. The system libpq-dev package is required; no PostgreSQL
+implementation is bundled. Test dependencies provide PostgreSQL and
+pg_virtualenv, which creates
+a disposable cluster on an unused local port and cleans it up on exit. Tests
+need no existing database, external network or account. The runtime package
+depends on libpq only; it does not install a PostgreSQL server.
+
+The build uses distribution compiler/hardening flags. Native Qore modules
+resolve Qore symbols at load time without linking libqore. debian/rules derives
+a minimum runtime and libqore SONAME package dependency from the installed SDK;
+dh_shlibdeps supplies other shared-library dependencies. The runtime package is
+not Multi-Arch: same because it requires the native Qore interpreter. There
+are no AOT user modules or Qore dependency trailers in this module; ordinary
+dh_strip is appropriate.
+
+Source and binary builds
+------------------------
+
+Use a fresh version for every changed upload. This snapshot precedes the 3.5.0
+release. From a clean committed checkout:
+
+    version=3.5.0~git20260928.1
+    mkdir -p ../pgsql-package-work
+    git archive --format=tar --prefix="qore-pgsql-module-$version/" \
+        HEAD -- . ':!debian' | xz > \
+        "../pgsql-package-work/qore-pgsql-module_$version.orig.tar.xz"
+    tar -xf "../pgsql-package-work/qore-pgsql-module_$version.orig.tar.xz" \
+        -C ../pgsql-package-work
+    cp -a debian "../pgsql-package-work/qore-pgsql-module-$version/"
+    cd "../pgsql-package-work/qore-pgsql-module-$version"
+    dpkg-buildpackage -S -us -uc
+
+Extract the .dsc with dpkg-source -x into a clean directory. With dependencies
+preinstalled, build as an unprivileged user with networking disabled:
+
+    dpkg-buildpackage -b -us -uc
+
+Architecture-only builds (-B) do not need Doxygen; architecture-independent
+builds (-A) produce documentation. Both DEB_BUILD_OPTIONS=nodoc and
+DEB_BUILD_PROFILES=nodoc suppress documentation; the profile also omits the doc
+package. Do not use nocheck for qualification.
+
+Qualification and publication
+-----------------------------
+
+All four upstream suites run against the newly built driver and a temporary
+PostgreSQL cluster. They cover data types, transactions, prepared statements,
+COPY/native bulk loading, mutation observers and cooperative cancellation.
+The optional pgvector case explicitly skips if the server extension is absent;
+qualify it separately with the matching postgresql-VERSION-pgvector package.
+A database preflight fails before tests if the driver cannot connect, so an
+unavailable server cannot turn the package checks into successful skips.
+Installed tests repeat all suites away from the source/build tree and compile
+a fresh Qore executable that performs a database round trip. No external Qore
+module is needed. The package includes ql_pgsql compiler metadata; the fresh
+compiler test also calls pgsql_bind() and uses a PostgreSQL type constant.
+
+Check source/binary Lintian, detached debug symbols and hardening, installation
+without libqore-dev, documentation/debug coinstallation, dpkg -V, purge/reinstall,
+and reproducibility from two distinct build directories. Retain the exact source
+commit, source/package hashes, dependency versions and logs. Publishing to the
+testing PPA is separate from approval for a final general release.

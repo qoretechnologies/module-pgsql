@@ -1,0 +1,9 @@
+Document: qore-pgsql-module
+Title: Qore PostgreSQL Module Reference
+Author: Qore Technologies, s.r.o.
+Abstract: API reference for using PostgreSQL databases through Qore DBI.
+Section: Programming
+
+Format: HTML
+Index: /usr/share/doc/qore-pgsql-module-doc/html/index.html
+Files: /usr/share/doc/qore-pgsql-module-doc/html/*.html

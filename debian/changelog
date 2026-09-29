@@ -1,0 +1,10 @@
+qore-pgsql-module (3.5.0~git20260928.1-0qore1~ubuntu26.04) resolute; urgency=medium
+
+  * Package the native PostgreSQL driver, metadata, docs and example tests.
+  * Initialize pgvector before opening the connection used by its tests.
+  * Use distribution libpq, native hardening and automatic debug symbols.
+  * Run integration tests against disposable local PostgreSQL clusters.
+  * Add installed runtime and fresh compiler/database round-trip tests.
+  * Support documentation profiles and reproducible offline builds.
+
+ -- David Nichols <david@qore.org>  Tue, 29 Sep 2026 00:51:19 +0000
