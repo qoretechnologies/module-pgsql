@@ -1,0 +1,13 @@
+#!/bin/sh
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# SPDX-License-Identifier: MIT
+set -eu
+test -n "${QORE_DB_CONNSTR_PGSQL:?run inside the PostgreSQL fixture}"
+module=${QORE_PGSQL_BINARY_MODULE:-pgsql}
+/usr/bin/qore -b --enable-debug -l "$module" -e 'Datasource db(ENV.QORE_DB_CONNSTR_PGSQL); db.open(); db.close();'
+if [ "${QORE_TEST_REQUIRE_PGVECTOR:-0}" = 1 ]; then
+    /usr/bin/qore -b --enable-debug -l "$module" -e 'Datasource db(ENV.QORE_DB_CONNSTR_PGSQL); db.exec("CREATE EXTENSION IF NOT EXISTS vector"); db.commit();'
+fi
+for suite in "$1"/*.qtest; do
+    timeout 180 /usr/bin/qore -b --enable-debug -l "$module" "$suite" -v
+done
