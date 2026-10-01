@@ -67,7 +67,7 @@ set(CPP_SRC
     src/QorePGMapper.cpp
 )
 
-qore_wrap_qpp_value(QPP_SOURCES METALIST QPP_META_SRC ${QPP_SRC})
+qore_wrap_qpp_value(QPP_SOURCES METALIST QPP_META_SRC DOXLIST QPP_DOX ${QPP_SRC})
 add_custom_target(QPP_GENERATED_FILES DEPENDS ${QPP_SOURCES})
 
 set(module_name "pgsql")
@@ -95,6 +95,8 @@ if (DEFINED ENV{DOXYGEN_EXECUTABLE})
     set(DOXYGEN_EXECUTABLE $ENV{DOXYGEN_EXECUTABLE})
 endif()
 
+list(APPEND QORE_DOXYGEN_MODULES BulkSqlUtil)
+set(MODULE_DOX_INPUT ${CMAKE_CURRENT_BINARY_DIR}/mainpage.dox ${QPP_DOX})
 qore_external_binary_module(${module_name} ${PROJECT_VERSION} ${PostgreSQL_LIBRARY} Threads::Threads)
 
 qore_dist(${PROJECT_VERSION})
