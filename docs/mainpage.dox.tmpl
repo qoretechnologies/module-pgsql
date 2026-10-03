@@ -76,59 +76,23 @@ major_version * 10000 + minor_version * 100 + sub_version
 
     Like all Qore components, the PostgreSQL DBI driver is thread-safe.
 
-    @section pgsqloptions Driver Options
+    @section pgsqldocumentation Documentation
 
-    @subpage pgsqloptionsguide
-
+    - @anchor pgsqloptions @subpage pgsqloptionsguide
+    - @anchor pgsqlbind @subpage pgsqlbindguide
+    - @anchor pgsqlbulkdml @subpage pgsqlbulkdmlguide
+    - @anchor pgsqlcopy @subpage pgsqlcopyguide
+    - @anchor pgsqlmutationobserver @subpage pgsqlmutationobserverguide
+    - @anchor pgsqluuid @subpage pgsqluuidguide
+    - @anchor pgsqlvector @subpage pgsqlvectorguide
+    - @anchor pgsqlschema @subpage pgsqlschemaguide
+    - @anchor pgsqlstoredprocs @subpage pgsqlstoredprocsguide
+    - @anchor pgsqlreleasenotes @subpage pgsqlreleasenotesguide
 
     @section pgsqltrans Transaction Management
 
     When the Datasource is not in auto-commit mode, this driver automatically inserts \c "begin" statements at the start of each transaction to provide consistent transaction handling across all Qore DBI drivers; it's not necessary to do this manually.
 
     Note that an exception while already in a transaction will have the effect that the pgsql connection cannot be used until the transaction is closed; this is different from most other current Qore DBI drivers. An exception in a Datasource::exec() method as the first statement of a transaction will cause an automatic implicit \c "rollback" to be executed to maintain compatibility with other Qore DBI drivers.
-
-    @section pgsqlbind Binding and Types
-
-    @subpage pgsqlbindguide
-
-
-    @section pgsqlbulkdml Bulk DML with Array Binds
-
-    @subpage pgsqlbulkdmlguide
-
-
-    @section pgsqlcopy COPY Protocol Support
-
-    @subpage pgsqlcopyguide
-
-
-    @section pgsqlmutationobserver COPY and the Datasource Mutation Observer
-
-    @subpage pgsqlmutationobserverguide
-
-
-    @section pgsqluuid UUID Type Support
-
-    @subpage pgsqluuidguide
-
-
-    @section pgsqlvector pgvector Type Support
-
-    @subpage pgsqlvectorguide
-
-
-    @section pgsqlschema Schema Introspection
-
-    @subpage pgsqlschemaguide
-
-
-    @section pgsqlstoredprocs Stored Procedures
-
-    @subpage pgsqlstoredprocsguide
-
-
-    @section pgsqlreleasenotes Release Notes
-
-    @subpage pgsqlreleasenotesguide
 
 */
