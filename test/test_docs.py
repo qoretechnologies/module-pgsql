@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # Copyright (C) 2026 Qore Technologies, s.r.o.
 # SPDX-License-Identifier: MIT
-"""Verify the binding API and its links in the generated driver overview."""
+"""Verify the binding API and its links in the generated driver guides."""
 from html.parser import HTMLParser
 from pathlib import Path
 import sys
@@ -34,15 +34,16 @@ class DocumentationTests(unittest.TestCase):
                     page = member.findtext("anchorfile")
                     self.assertTrue((BUILD / "docs/pgsql/html" / page).is_file(), page)
 
-    def test_driver_overview_links_to_the_binding_function(self):
+    def test_binding_guide_links_to_the_binding_function(self):
         tree = ET.parse(BUILD / "pgsql.tag")
         targets = {m.findtext("anchorfile") + "#" + m.findtext("anchor")
                    for m in tree.findall(".//member") if m.findtext("name") == "pgsql_bind"}
-        links = Links(BUILD / "docs/pgsql/html/index.html").links
+        links = Links(BUILD / "docs/pgsql/html/pgsqlbindguide.html").links
         self.assertTrue(targets.intersection(links), targets)
 
-    def test_overview_links_to_sdk_timezone_and_bulk_reference(self):
-        links = Links(BUILD / "docs/pgsql/html/index.html").links
+    def test_guides_link_to_sdk_timezone_and_bulk_reference(self):
+        links = Links(BUILD / "docs/pgsql/html/pgsqloptionsguide.html").links + \
+                Links(BUILD / "docs/pgsql/html/pgsqlbulkdmlguide.html").links
         self.assertTrue(any(link.split("#", 1)[0].endswith("/time_zones.html") for link in links))
         self.assertTrue(any("/BulkSqlUtil/html/" in link for link in links))
 

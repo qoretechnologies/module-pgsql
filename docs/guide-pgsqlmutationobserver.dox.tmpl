@@ -5,8 +5,7 @@
     @tableofcontents
 
     When the driver is built against %Qore 3.0 or later and a
-    <a href="../../../lang/html/class_qore_1_1_s_q_l_1_1_abstract_datasource.html">datasource mutation
-    observer</a> is registered on the datasource or pool, a <tt>COPY ... FROM STDIN</tt> operation
+    @ref Qore::SQL::AbstractDatasource "datasource mutation observer" is registered on the datasource or pool, a <tt>COPY ... FROM STDIN</tt> operation
     reports bounded stream boundaries while it streams:
 
     - a stream begin boundary once the server has entered \c COPY \c IN mode;
@@ -51,7 +50,7 @@
     @note
     - This requires %Qore 3.0 or later; when built against an older %Qore the driver compiles the
       reporting calls out entirely and the \c COPY path is unchanged
-    - Array binds (see @ref pgsqlbulkdml) are sent in a single round trip rather than streamed, so
+    - Array binds (see @ref pgsqlbulkdmlguide) are sent in a single round trip rather than streamed, so
       they are reported through the ordinary statement and transaction boundaries instead of as a
       bounded stream
 */

@@ -10,7 +10,7 @@
     statement parsing for each row.
 
     The COPY protocol is the fastest way to load data into PostgreSQL but does not support upserts
-    or \c RETURNING clauses. Use \ref pgsqlbulkdml "array binds" when those features are needed.
+    or \c RETURNING clauses. Use \ref pgsqlbulkdmlguide "array binds" when those features are needed.
 
     @par Example: Using COPY via PgsqlSqlUtil
     @code{.py}
@@ -64,10 +64,10 @@ map op.queueData($1), rows.iterator();
     @endcode
 
     When this opt-in path is selected, the driver starts one <tt>COPY ... FROM STDIN</tt> operation,
-    sends each BulkSqlUtil block with one c PQputCopyData() call, and finalizes or aborts it from the
+    sends each BulkSqlUtil block with one \c PQputCopyData() call, and finalizes or aborts it from the
     driver-neutral begin/rows/end protocol.  The legacy direct-SQL COPY detection remains available
     unchanged for compatibility.  Native COPY is insert-only and cannot provide c RETURNING values
-    or row callbacks; BulkSqlUtil rejects those combinations with c "bulk_load": c True and uses its
+    or row callbacks; BulkSqlUtil rejects those combinations with \c "bulk_load": \c True and uses its
     ordinary insert path with c "bulk_load": c "auto".
 
     @note
@@ -76,5 +76,5 @@ map op.queueData($1), rows.iterator();
     - The operation is cancellable via Qore's standard I/O interruption mechanism
     - On error, the COPY operation is aborted and the transaction must be rolled back
     - COPY streams report bounded stream boundaries to a datasource mutation observer if one is
-      registered; see @ref pgsqlmutationobserver
+      registered; see @ref pgsqlmutationobserverguide
 */
