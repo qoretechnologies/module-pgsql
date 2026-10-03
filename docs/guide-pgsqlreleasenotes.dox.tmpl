@@ -1,0 +1,183 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page pgsqlreleasenotesguide Release Notes
+
+    @tableofcontents
+
+    - public API documentation includes generated QPP declarations and binding links
+    - CMake uninstall honors staging paths and preserves unrelated files and directories
+
+    @section pgsql35 pgsql Driver Version 3.5
+    - fixed pgvector test setup on fresh databases by installing the extension before
+      opening the connection that discovers and tests its types
+    - added the settable \c "tcp-user-timeout" connection option (libpq \c tcp_user_timeout), enabled
+      by default with a 30-second limit; a query in flight when the server's host disappears without
+      closing the connection now fails once its data has gone unacknowledged for that long, instead
+      of blocking for about 15 minutes until the kernel's retransmission limit; keepalives do not
+      cover this case because they only probe idle connections
+      (see @ref pgsql_connection_options)
+    - fixed binding an argument that holds a weak (\c ":=") or opaque (\c "@=") reference: a
+      prepared statement walks the argument list it was given, so such an element is what the
+      iterator yields rather than its target; a weak reference failed with
+      <tt>don't know how to bind type 'weak list reference'</tt> and an opaque one crashed the
+      driver, even though the target binds normally
+    - fixed a heap buffer overflow binding a \c number with more than ~197 decimal digits; the
+      binary \c numeric encoder wrote its base-10000 digits into a fixed 50-element array with no
+      bound check, which corrupted the heap and made the server reject the value with
+      <tt>invalid digit in external "numeric" value</tt>.  %Qore raises a number's working
+      precision on every addition to keep sums exact, so a quotient of accumulated sums reaches
+      that length without anything unusual happening in the calling code
+    - fixed the display scale sent with a bound \c number: it accumulated the number of
+      \a remaining fraction digits once per four-digit group instead of the fraction length, so a
+      value with more than four decimal places was stored with trailing zeros
+      (\c 0.12345 became \c 0.123450), and a long fraction could also overflow the server's
+      maximum scale
+    - added \c DBI_CAP_HAS_BULK_LOAD support using a persistent PostgreSQL
+      <tt>COPY ... FROM STDIN</tt> session; BulkSqlUtil can opt in with \c "bulk_load": \c True or
+      use \c "auto" policy, and each buffered row block is sent with one \c PQputCopyData() call
+    - native COPY owns bounded stream reporting, so BulkSqlUtil does not double-report events; byte
+      accounting is the exact escaped text-COPY payload sent to libpq, including separators and row
+      terminators
+    - native COPY validates row-block shapes, checks cooperative cancellation while rendering large
+      blocks, aborts cleanly on observer refusal or overrun, and drains the server result on every end
+      path so the connection can be reused after rollback
+    - the raw <tt>COPY ... FROM STDIN</tt> SQL detection path remains supported unchanged
+    - removed the autotools build; the module is now built with CMake only
+
+    @section pgsql34 pgsql Driver Version 3.4
+    - \c COPY \c FROM \c STDIN operations now report bounded stream boundaries to a datasource
+      mutation observer when the driver is built against %Qore 3.0 or later; declared and consumed
+      byte counts are reported without the payload ever being buffered, and a consumer can reject a
+      stream before any data is sent or stop it while it is streaming
+      (see @ref pgsqlmutationobserver)
+    - added settable libpq connection options (\c "keepalives", \c "keepalives-idle",
+      \c "keepalives-interval", \c "keepalives-count", and \c "connect-timeout"); TCP keepalives are
+      now enabled by default with a 60-second idle time so the server promptly reaps backends orphaned
+      by an unclean client exit instead of leaving them idle until the OS keepalive default (often 2
+      hours), which could exhaust \c max_connections (see @ref pgsql_connection_options)
+    - added the settable \c "application-name" connection option, which reports a libpq
+      \c application_name to the server (visible in \c pg_stat_activity.application_name) so the client
+      or connection pool owning each backend can be identified (see @ref pgsql_connection_options)
+    - added pgvector extension type support (\c vector, \c halfvec, \c sparsevec): type OIDs are
+      automatically discovered at connection time by querying \c pg_type; the module works
+      transparently on databases with or without pgvector installed
+      (<a href="https://github.com/pgvector/pgvector">pgvector</a>)
+    - added pgsql_bind_vector() function for convenient vector binding
+    - vectors are returned as typed \c list<float> values; halfvec values are decoded from
+      IEEE 754 half-precision; sparsevec values are returned as hashes with \c dim, \c nnz,
+      \c indices, and \c values keys
+    - added support for \c vector[] array binds via string type name mechanism
+    - added \c vector, \c halfvec, and \c sparsevec to the \c describe() output with
+      appropriate Qore type mappings
+    - fixed a pre-existing memory leak in text-format typed scalar binds where the string buffer
+      was not freed in \c reset() (only \c TEXTOID was handled; now all text-format non-array binds
+      are freed)
+    - fixed a pre-existing uninitialized memory read in \c reset() by value-initializing \c parambuf
+    - added columnar DBI result support with \c Datasource::selectColumnar() and
+      \c SQLStatement::fetchColumnar() when built against %Qore with columnar DBI APIs, including dense buffers
+      for PostgreSQL \c boolean, integer, floating-point, string-like, bounded \c numeric(p,s), date/time, and
+      interval result columns where the linked %Qore runtime supports the corresponding dense logical column type
+
+    @section pgsql33 pgsql Driver Version 3.3
+    - added \c DBI_CAP_HAS_ARRAY_BIND support: Qore lists are automatically encoded as PostgreSQL
+      binary arrays, enabling efficient bulk DML via the \c BulkSqlUtil module and PostgreSQL's
+      \c unnest() function; supported types: \c int, \c float, \c number, \c string, \c bool,
+      \c date, and \c binary with NULL support within arrays
+    - added \c COPY \c FROM \c STDIN protocol support for maximum-throughput bulk inserts: when a
+      \c COPY statement is executed with a hash-of-lists argument, the driver streams data directly
+      to PostgreSQL using the binary COPY protocol
+    - added array bind size validation: all list parameters bound in the same statement must have
+      the same number of elements
+    - added native UUID type support with pgsql_bind_uuid() function
+    - added schema introspection SQL constants (PGSQL_SQL_LIST_TABLES, PGSQL_SQL_TABLE_COLUMNS, etc.)
+    - added additional character encoding mappings (Windows code pages 1250-1258)
+    - fixed a memory leak when \c add() failed mid-parse (e.g., array size mismatch): extra
+      \c parambuf entries beyond \c nParams were not freed in \c reset()
+    - fixed a bug retrieving negative \c INT2 and \c INT4 values (were returned as unsigned)
+    - fixed a bug in interval array binding where hours were incorrectly calculated
+    - fixed a bug in boolean array binding where \c htonl() was incorrectly applied
+    - fixed server description format in error messages
+
+    @section pgsql321 pgsql Driver Version 3.2.1
+    - fixed support for PostgreSQL 18
+      (<a href="https://github.com/qorelanguage/qore/issues/5002">issue 5002</a>)
+
+    @section pgsql32 pgsql Driver Version 3.2
+    - added support for the \c XML, \c JSON, and \c JSONB types
+      (<a href="https://github.com/qorelanguage/qore/issues/4448">issue 4448</a>)
+
+    @section pgsql311 pgsql Driver Version 3.1.1
+    - fixed a bug handling server disconnections and automatic reconnections
+      (<a href="https://github.com/qorelanguage/qore/issues/4368">issue 4368</a>)
+
+    @section pgsql31 pgsql Driver Version 3.1
+    - fixed a bug retrieving numeric data from multiple SQLStatement::fetchRow() calls
+      (<a href="https://github.com/qorelanguage/qore/issues/4249">issue 4249</a>)
+    - fixed a bug where a spurious transaction was raised with a reconnect when not in a tranaction
+      (<a href="https://github.com/qorelanguage/qore/issues/3977">issue 3977</a>)
+
+    @section pgsql30 pgsql Driver Version 3.0
+    <b>New Features and Bug Fixes</b>
+    - updated to build with %Qore 0.9
+    - exceptions thrown by PostgreSQL module contains arg values with alterr and alterr_diag strings as described in
+      <a href="https://www.postgresql.org/docs/current/static/errcodes-appendix.html">PostgreSQL error codes</a>
+    - fixed a crash reiterating SQL statements with no bind arguments
+      (<a href="https://github.com/qorelanguage/qore/issues/3627">issue 3627</a>)
+
+    @section pgsql242 pgsql Driver Version 2.4.2
+    <b>Bug Fixes</b>
+    - fixed a bug retrieving \c DATE column values after the year 2038
+      (<a href="https://github.com/qorelanguage/qore/issues/2986">issue 2986</a>)
+
+    @section pgsql241 pgsql Driver Version 2.4.1
+    <b>New Features and Bug Fixes</b>
+    - updated SQLStatement::fetchColumns() to return an empty hash when no data is available (<a href="https://github.com/qorelanguage/qore/issues/1241">issue 1241</a>)
+    - fixed a formatting bug in an error message (<a href="https://github.com/qorelanguage/qore/issues/2018">issue 2018</a>)
+    - fixed selecting numeric values between 0 and 1 (<a href="https://github.com/qorelanguage/qore/issues/2149">issue 2149</a>)
+    - fixed a bug where \c DBI-SELECT-ROW-ERROR exceptions were being raised as \c PGSQL-SELECT-ROW-ERROR exceptions (<a href="https://github.com/qorelanguage/qore/issues/2542">issue 2542</a>)
+
+    @section pgsql24 pgsql Driver Version 2.4
+
+    <b>New Features and Bug Fixes</b>
+    - placeholders and quotes in SQL comments are ignored
+    - fixed major bugs in SQLStatement::fetchRows() and SQLStatement::fetchColumns() where only the first call would succeed
+    - added the pgsql_bind_array() function to support bulk DML
+    - fixed a bug retrieving numeric values; values too large for a 64-bit integer were being retrieved as a 64-bit integer
+    - ported db-test.q to new-style and QUnit
+    - changed the minimum required Qore version to 0.8.12 to support the test script wth QUnit
+    - fixed a bug where interval values retrieved from the DB were justified to hours and minutes
+    - fixed a bug where \c CHAR values were returned with an invalid internal string size
+    - fixed a bug where arbitrary-precision numeric values bound to numeric columns were bound with an incorrect scale value causing the digits behind the decimal place to be lost (<a href="https://github.com/qorelanguage/qore/issues/386">issue 386</a>)
+    - fixed a bug where SQLStatement::describe() was failing even though result set information was available
+    - fixed a bug where duplicate column names in result sets caused memory leaks (and they were not renamed; <a href="https://github.com/qorelanguage/qore/issues/831">issue 831</a>)
+
+    @section pgsql23 pgsql Driver Version 2.3
+
+    <b>New Features and Bug Fixes</b>
+    - treat \c UNKNOWNOID as string; fixes cases such as selecting string constants (ie \c "select 'string'")
+
+    @section pgsql22 pgsql Driver Version 2.2
+
+    <b>New Features and Bug Fixes</b>
+    - fixed a bug with the SQLStatement class where bind arguments were not bound on subsequent calls to SQLStatement::exec() or SQLStatement::execArgs()
+
+    @section pgsql21 pgsql Driver Version 2.1
+
+    <b>New Features and Bug Fixes</b>
+    - implemented support for DBI_CAP_AUTORECONNECT; the driver will automatically and transparently reconnect to the DB server if the connection is lost while not in a transaction; if a transaction was in progress a reconnection will also be made, but an exception will also be thrown reflecting the loss of transaction state
+    - fixed a crashing bug serializing the zero number value (0n) to PostgreSQL's binary decimal representation
+
+    @section pgsql20 pgsql Driver Version 2.0
+
+    <b>New Features and Bug Fixes</b>
+    - implemented support for the selectRow DBI method
+    - implemented support for the prepared statement API
+    - implemented support for binding and retrieving "number" types
+    - implemented support for the following DBI options:
+      - \c "optimal-numbers": return \c NUMERIC or \c DECIMAL types as an integer if possible, if not as an arbitrary-precision number
+      - \c "string-numbers": return \c NUMERIC or \c DECIMAL types as strings (for backwards-compatibility)
+      - \c "numeric-numbers": return \c NUMERIC or \c DECIMAL types as arbitrary-precision number values
+      - \c "timezone": accepts a string argument that can be either a region name (ex: \c "Europe/Prague") or a UTC offset (ex: \c "+01:00") to set the server's time zone rules; this is useful if connecting to a database server in a different time zone.  If this option is not set then the server's time zone is assumed to be the same as the client's time zone; see @ref pgsql_timezone.
+    - the default for the number options (see @ref pgsql_number_options) is now "optimal-numbers" - meaning that \c NUMERIC or \c DECIMAL values are retrieved as <tt>int</tt> if possible, otherwise a <tt>number</tt> type is returned.\n
+      For backwards-compatibility, set the \c "string-numbers" option to return \c NUMERIC or \c DECIMAL values as strings, however note that PostgreSQL does not allow binding a string for a \c NUMERIC or \c DECIMAL column value; this will result in an error response by the server
+*/

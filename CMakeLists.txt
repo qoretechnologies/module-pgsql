@@ -74,6 +74,16 @@ set(module_name "pgsql")
 
 set(QORE_DOX_TMPL_SRC
   docs/mainpage.dox.tmpl
+    docs/guide-pgsqlbind.dox.tmpl
+    docs/guide-pgsqlbulkdml.dox.tmpl
+    docs/guide-pgsqlcopy.dox.tmpl
+    docs/guide-pgsqlmutationobserver.dox.tmpl
+    docs/guide-pgsqloptions.dox.tmpl
+    docs/guide-pgsqlreleasenotes.dox.tmpl
+    docs/guide-pgsqlschema.dox.tmpl
+    docs/guide-pgsqlstoredprocs.dox.tmpl
+    docs/guide-pgsqluuid.dox.tmpl
+    docs/guide-pgsqlvector.dox.tmpl
 )
 
 if(enable-scu)
@@ -97,6 +107,18 @@ endif()
 
 list(APPEND QORE_DOXYGEN_MODULES BulkSqlUtil)
 set(MODULE_DOX_INPUT ${CMAKE_CURRENT_BINARY_DIR}/mainpage.dox ${QPP_DOX})
+list(APPEND MODULE_DOX_INPUT
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlbind.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlbulkdml.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlcopy.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlmutationobserver.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqloptions.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlreleasenotes.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlschema.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlstoredprocs.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqluuid.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlvector.dox
+)
 qore_external_binary_module(${module_name} ${PROJECT_VERSION} ${PostgreSQL_LIBRARY} Threads::Threads)
 
 qore_dist(${PROJECT_VERSION})

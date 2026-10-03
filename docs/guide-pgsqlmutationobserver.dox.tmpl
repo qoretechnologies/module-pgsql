@@ -1,0 +1,57 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page pgsqlmutationobserverguide COPY and the Datasource Mutation Observer
+
+    @tableofcontents
+
+    When the driver is built against %Qore 3.0 or later and a
+    <a href="../../../lang/html/class_qore_1_1_s_q_l_1_1_abstract_datasource.html">datasource mutation
+    observer</a> is registered on the datasource or pool, a <tt>COPY ... FROM STDIN</tt> operation
+    reports bounded stream boundaries while it streams:
+
+    - a stream begin boundary once the server has entered \c COPY \c IN mode;
+    - a stream progress boundary carrying the number of bytes sent so far, delivered on 64 KB
+      boundaries rather than per row so that the reporting cost does not scale with the row count;
+    - a stream end boundary carrying the total number of bytes sent and whether the stream completed.
+
+    The payload is never buffered merely to measure it: the direct-SQL path serializes and sends one
+    row at a time, while the driver-neutral native path serializes the block already buffered by
+    BulkSqlUtil and sends it once.  Only cumulative byte counts are retained for reporting.  Consumed
+    bytes are the exact number of escaped text-COPY payload bytes handed to libpq, including field
+    separators and row terminators.  This can differ from BulkSqlUtil's driver-neutral fallback
+    estimate, which measures serialized values without PostgreSQL COPY escaping and framing.  The
+    driver cannot know the complete payload size before serializing it, so it reports a declared size
+    of 0 and %Qore falls back to the \c "max_growth_bytes" value of the producer's mutation
+    declaration, if any.
+
+    A consumer can reject the stream at the begin boundary, in which case no data is sent at all, or
+    stop it at any progress boundary, in which case the \c COPY is aborted with \c PQputCopyEnd()
+    and the transaction must be rolled back.  In both cases the exception raised by the consumer is
+    propagated to the caller.
+
+    @par Example
+    @code{.py}
+{
+    # declare what the operation does; Qore never inspects the SQL to work this out
+    SqlMutationDeclaration decl(ds, <SqlMutationInfo>{
+        "op_id": op_id,
+        "path_id": "my_table.copy",
+        "op_code": OP_COPY,
+        "effect": SQL_MUTATION_EFFECT_MAY_GROW,
+        "max_growth_bytes": 16 * 1024 * 1024,
+    });
+    int rows = ds.exec("COPY my_table (id, name) FROM STDIN", {
+        "id": ids,
+        "name": names,
+    });
+    ds.commit();
+}
+    @endcode
+
+    @note
+    - This requires %Qore 3.0 or later; when built against an older %Qore the driver compiles the
+      reporting calls out entirely and the \c COPY path is unchanged
+    - Array binds (see @ref pgsqlbulkdml) are sent in a single round trip rather than streamed, so
+      they are reported through the ordinary statement and transaction boundaries instead of as a
+      bounded stream
+*/

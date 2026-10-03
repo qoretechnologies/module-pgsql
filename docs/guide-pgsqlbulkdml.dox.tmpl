@@ -1,0 +1,73 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page pgsqlbulkdmlguide Bulk DML with Array Binds
+
+    @tableofcontents
+
+    The pgsql driver supports \c DBI_CAP_HAS_ARRAY_BIND, enabling high-performance bulk DML operations
+    through the @ref BulkSqlUtil module. When Qore lists are passed as bind parameters, the driver
+    automatically encodes them as PostgreSQL binary arrays, which can be used with PostgreSQL's
+    \c unnest() function for efficient bulk inserts and upserts.
+
+    The following types are supported in array binds: \c int, \c float, \c number, \c string, \c bool,
+    \c date (absolute and relative), and \c binary. NULL values are supported within arrays. All arrays
+    bound in the same statement must have the same number of elements.
+
+    @par Example: Using BulkInsertOperation
+    @code{.py}
+%requires BulkSqlUtil
+%requires PgsqlSqlUtil
+
+Datasource ds("pgsql:user/pass@db%host");
+Table table(ds, "my_table");
+
+# BulkInsertOperation automatically uses array binds with PostgreSQL
+BulkInsertOperation insert(table);
+on_success {
+    insert.flush();
+    ds.commit();
+}
+on_error {
+    insert.discard();
+    ds.rollback();
+}
+
+# queue rows - they are flushed in efficient batches of 1000 (default)
+for (int i = 0; i < 10000; ++i) {
+    insert.queueData({"id": i, "name": sprintf("item_%d", i), "value": i * 1.5});
+}
+    @endcode
+
+    @par Example: Direct UNNEST query
+    @code{.py}
+# bind lists directly - driver encodes them as PostgreSQL arrays
+list<int> ids = (1, 2, 3, 4, 5);
+list<string> names = ("Alice", "Bob", "Charlie", "Dave", "Eve");
+hash<auto> result = ds.select(
+    "select * from unnest(%v::bigint[], %v::text[]) as t(id, name)",
+    ids, names
+);
+    @endcode
+
+    @par Example: Bulk upsert with BulkUpsertOperation
+    @code{.py}
+%requires BulkSqlUtil
+%requires PgsqlSqlUtil
+
+Datasource ds("pgsql:user/pass@db%host");
+Table table(ds, "my_table");
+
+# BulkUpsertOperation uses UNNEST + ON CONFLICT for atomic upserts
+BulkUpsertOperation upsert(table);
+on_success {
+    upsert.flush();
+    ds.commit();
+}
+on_error {
+    upsert.discard();
+    ds.rollback();
+}
+
+map upsert.queueData($1), data.iterator();
+    @endcode
+*/

@@ -1,0 +1,29 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page pgsqlstoredprocsguide Stored Procedures
+
+    @tableofcontents
+
+    Stored procedure execution is supported; the following is an example of a stored procedure call:
+
+    Example PostgreSQL PLPG/SQL function:
+    @code{.sql}
+create or replace function int_test(val int4) returns int4 as $$
+begin
+    return val * 2;
+end;
+$$ language plpgsql;
+   @endcode
+
+   Example Qore code to call this function:
+   @code{.py}
+hash<auto> result = db.exec("select int_test(%v)", 11);
+printf("%N\n", result);
+   @endcode
+
+   Resulting in:
+   @verbatim
+hash: (1 member)
+  int_test : 22
+   @endverbatim
+*/

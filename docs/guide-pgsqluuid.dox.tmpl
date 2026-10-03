@@ -1,0 +1,19 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page pgsqluuidguide UUID Type Support
+
+    @tableofcontents
+
+    The pgsql driver supports the PostgreSQL UUID data type natively. UUIDs are returned as strings in the standard format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
+
+    To bind a UUID value explicitly, use the pgsql_bind_uuid() function:
+
+    @code{.py}
+# Insert a UUID value
+db.exec("insert into users (id) values (%v)", pgsql_bind_uuid("550e8400-e29b-41d4-a716-446655440000"));
+
+# Select a UUID value (returned as string)
+hash<auto> user = db.selectRow("select * from users where id = %v", pgsql_bind_uuid("550e8400-e29b-41d4-a716-446655440000"));
+printf("User ID: %s\n", user.id);  # prints: 550e8400-e29b-41d4-a716-446655440000
+    @endcode
+*/

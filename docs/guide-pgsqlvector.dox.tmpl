@@ -1,0 +1,66 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page pgsqlvectorguide pgvector Type Support
+
+    @tableofcontents
+
+    The pgsql driver supports the <a href="https://github.com/pgvector/pgvector">pgvector</a> extension types
+    (\c vector, \c halfvec, and \c sparsevec) for vector similarity search operations used in AI/ML workloads.
+
+    @section pgsqlvector_discovery Automatic Type Discovery
+
+    Since pgvector types have dynamically-assigned OIDs (different per database), the driver automatically
+    discovers them by querying \c pg_type at connection time. If pgvector is not installed, the driver works
+    normally without vector support and no errors are raised.
+
+    @section pgsqlvector_types Type Mapping
+
+    |!PostgreSQL Type|!Qore Type|!Description
+    |\c vector|\c list<float>|Standard full-precision (float32) vectors
+    |\c halfvec|\c list<float>|Half-precision (float16) vectors, returned as doubles
+    |\c sparsevec|\c hash|Sparse vectors: \c {"dim": N, "nnz": M, "indices": [...], "values": [...]}
+
+    @section pgsqlvector_binding Binding Vectors
+
+    Use pgsql_bind_vector() to bind a list of float values as a \c vector:
+
+    @code{.py}
+# Insert a vector value
+db.exec("insert into items (embedding) values (%v)", pgsql_bind_vector((1.5, 2.3, 4.1)));
+
+# Integer values are auto-converted to floats
+db.exec("insert into items (embedding) values (%v)", pgsql_bind_vector((1, 2, 3)));
+
+# NULL vector
+db.exec("insert into items (embedding) values (%v)", pgsql_bind_vector(NOTHING));
+    @endcode
+
+    Alternatively, use the string type name bind mechanism:
+
+    @code{.py}
+# Bind a vector using string type name
+db.exec("insert into items (embedding) values (%v)", {"^pgtype^": "vector", "^value^": (1.5, 2.3, 4.1)});
+
+# Bind a halfvec
+db.exec("insert into items (embedding_hv) values (%v)", {"^pgtype^": "halfvec", "^value^": (1.0, 2.0, 3.0)});
+
+# Bind an array of vectors
+db.exec("insert into items (embeddings) values (%v)",
+    {"^pgtype^": "vector[]", "^value^": ((1.0, 2.0, 3.0), (4.0, 5.0, 6.0))});
+    @endcode
+
+    @section pgsqlvector_reading Reading Vectors
+
+    Vectors are automatically returned as typed \c list<float> values:
+
+    @code{.py}
+hash<auto> row = db.selectRow("select embedding from items where id = 1");
+list<float> vec = row.embedding;  # (1.5, 2.3, 4.1)
+    @endcode
+
+    @note pgvector uses single-precision (float32) storage. Values are converted to Qore's double-precision
+    (float64) when reading, which is lossless. When binding, double-precision values are truncated to float32
+    by PostgreSQL.
+
+    @since pgsql 3.4
+*/

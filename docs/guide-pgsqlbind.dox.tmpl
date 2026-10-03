@@ -1,0 +1,88 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page pgsqlbindguide Binding and Types
+
+    @tableofcontents
+
+    When binding by value, PostgreSQL servers do not convert data types as freely as many other database servers; instead the server throws an error if the bound type does not closely match the expected data type. For example, binding a string or float value to a \c NUMERIC data type will cause an exception to be thrown. To successfully bind by value, either use a PostgreSQL type cast in the SQL text (i.e. \c "::type") or use the @ref Qore::Pgsql::pgsql_bind "pgsql_bind()" or @ref Qore::Pgsql::pgsql_bind_array "pgsql_bind_array()" functions to specify the type to bind. See @ref pgsql_binding_by_value for more information about how types are bound when binding by value with this driver.
+
+    For \c NUMERIC columns, the %d specification in the query string can be used to substitute a numeric value or a literal null directly in the query string, providing the same effect as a bind by value in a very convenient form for the programmer. For example:
+
+    @code{.py}
+# the %d will be substituted with the value of id directly in the query text
+# or with a "null" in case id has no value (or is NULL)
+*hash<auto> results = db.select("select * from table where id = %d", id);
+    @endcode
+
+    Due to the fact that Qore date/time values support time zone information, when PostgreSQL data including a time zone component is converted to a Qore data type, the time zone information is also maintained. Also, Qore date/time values support a microsecond resolution, matching PostgreSQL's microsecond support, so this information is also maintained.
+
+    Note that binding by placeholder is not required or supported by this driver as PostgreSQL returns values directly; Qore DBI placeholder buffer specifications are ignored when the pgsql driver is used.
+
+    When binding arrays, all data types in the Qore list must be identical. When binding multi-dimensional arrays, the number of elements in each list in each array dimension must be the same. These are PostgreSQL restrictions (at least up to version 8.2).
+
+    When retrieving PostgreSQL data, PostgreSQL types are converted to Qore types as per @ref pgsql_to_qore.
+
+    @section pgsql_timezone Time Zone Support
+
+    The driver now sets the server's time zone rules when the connection is established; this is taken from the current time zone settings of the calling Program object and can also be overridden/changed by setting the \c "timezone" driver option (see @ref pgsqloptions).
+
+    All date/time values bound by value are converted to the server's time zone before binding to ensure that date/time values are stored correctly in the server.
+
+    When selecting date/time values, the values returned are tagged with the server's time zone.
+
+    Note that the above rules are applied when the current Program's time zone settings are different than the connection's time zone settings at the time when the write operation (bind) read operation (select) is performed.  This is meant to provide consistent support to connecting to a database server in a different time zone.
+
+    @section pgsql_binding_by_value Binding By Value
+
+    The following table gives data mapping when binding qore types by value. Be aware that PostgreSQL does only limited implicit type conversions when binding by value; to specify other types, either use a PostgreSQL type cast (i.e. \c "::type") or use the @ref Qore::Pgsql::pgsql_bind "pgsql_bind()" or @ref Qore::Pgsql::pgsql_bind_array "pgsql_bind_array()" functions.
+
+    |!QoreType|!PostgreSQL Type|!Description
+    |\c int|\c INT2, \c INTEGER, \c INT8|Depending on the size of the integer, the appropriate PostgreSQL type is bound. This is to avoid errors by using a type larger than that specified for the column or variable, as converting from a smaller type to a larger type is done automatically by the server.
+    |\c float|\c FLOAT88|Qore float data is converted directly to PostgreSQL float8 data.
+    |\c string|\c TEXT|The character encoding is converted to the encoding specified for the connection if necessary.
+    |\c bool|\c BOOLEAN|Qore boolean values are converted directly to the PostgreSQL boolean format.
+    |\c date|\c INTERVAL, \c TIMESTAMP|Relative date/time values are bound as interval data, absolute date/time values are bound as timestamp data
+    |\c binary|\c BYTEA|Qore binary data is bound directly as bytea data.
+
+    @section pgsql_to_qore PostgreSQL to Qore Type Mappings
+    |!PostgreSQL Type|!Qore Type|!Notes
+    |\c BOOLEAN|\c bool|direct conversion
+    |\c BYTEA|\c binary|direct conversion
+    |\c CHAR|\c string|trailing whitespace is removed
+    |\c BPCHAR|\c string|trailing whitespace is removed
+    |\c INT8|\c Int|direct conversion
+    |\c INTEGER|\c Int|direct conversion
+    |\c OID|\c Int|direct conversion
+    |\c XID|\c Int|direct conversion
+    |\c CID|\c Int|direct conversion
+    |\c INT2|\c Int|direct conversion
+    |\c TEXT|\c string|direct conversion
+    |<tt>CHAR VARYING</tt>|\c string|trailing whitespace is removed
+    |\c NAME|\c string|direct conversion
+    |\c FLOAT4|\c Float|direct conversion
+    |\c FLOAT8|\c Float|direct conversion
+    |\c ABSTIME|\c Date (absolute)|direct conversion
+    |\c RELTIME|\c Date (relative)|direct conversion to relative seconds
+    |\c TIMESTAMP|\c Date (absolute)|microseconds are maintained
+    |<tt>TIMESTAMP WITH TIMEZONE</tt>|\c Date (absolute)|microseconds and time zone information are maintained
+    |\c DATE|\c Date (absolute)|direct conversion
+    |\c INTERVAL|\c Date (relative)|Direct conversion to relative months, seconds, microseconds, and for servers that send a separate day value, to relative days.
+    |\c TIME|\c Date (absolute)|Microseconds are maintained. Note that the date portion is set to January 1, 1970, the beginning of the 64-bit qore epoch.
+    |<tt>TIME WITH TIMEZONE</tt>|\c Date (absolute)|Microseconds and time zone information are maintained. Note that the date portion is set to January 1, 1970, the beginning of the 64-bit qore epoch.
+    |\c TINTERVAL|\c string|string format is given in PostgreSQL tinterval format ([\c "YYYY-MM-DD hh:mm:ss" \c "YYYY-MM-DD hh:mm:ss"])
+    |\c NUMERIC|\c string|To avoid loss of precision, the information is converted to a string
+    |\c CASH|\c Float|direct conversion
+    |\c MACADDR|\c string|format: <tt>xx:xx:xx:xx:xx:xx</tt>
+    |\c INET|\c string|ipv4: <tt>n.n.n.n/net</tt>, ipv6: <tt>x:x:x:x:x:x:x:x/net</tt>
+    |\c CIDR|\c string|ipv4: <tt>n.../net</tt>, ipv6: <tt>x:...::/net</tt>
+    |\c TID|\c string|format: <tt>(n,n)</tt>
+    |\c BIT|\c binary|direct conversion
+    |\c VARBIT|\c binary|direct conversion
+    |\c POINT|\c string|format: <tt>n,n</tt>
+    |\c LSEG|\c string|format: <tt>(n,n),(n,n)</tt>
+    |\c BOX|\c string|format: <tt>(n,n),(n,n)</tt>
+    |\c PATH|\c string|in PostgreSQL text format depending on path type
+    |\c POLYGON|\c string|in PostgreSQL text format for polygons <tt>((n,n),...)</tt>
+    |\c CIRCLE|\c string|format: <tt><(n,n),n></tt>
+    |\c UUID|\c string|format: <tt>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</tt>
+*/

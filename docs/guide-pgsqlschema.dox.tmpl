@@ -1,0 +1,33 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page pgsqlschemaguide Schema Introspection
+
+    @tableofcontents
+
+    The pgsql module provides SQL constants for common schema introspection tasks. These can be used with Datasource::selectRows() to query database metadata.
+
+    Available constants:
+    - @ref Qore::Pgsql::PGSQL_SQL_LIST_TABLES "PGSQL_SQL_LIST_TABLES" - list all user tables
+    - @ref Qore::Pgsql::PGSQL_SQL_LIST_SCHEMAS "PGSQL_SQL_LIST_SCHEMAS" - list all schemas
+    - @ref Qore::Pgsql::PGSQL_SQL_TABLE_COLUMNS "PGSQL_SQL_TABLE_COLUMNS" - get columns for a table
+    - @ref Qore::Pgsql::PGSQL_SQL_TABLE_INDEXES "PGSQL_SQL_TABLE_INDEXES" - get indexes for a table
+    - @ref Qore::Pgsql::PGSQL_SQL_TABLE_FOREIGN_KEYS "PGSQL_SQL_TABLE_FOREIGN_KEYS" - get foreign keys
+    - @ref Qore::Pgsql::PGSQL_SQL_LIST_FUNCTIONS "PGSQL_SQL_LIST_FUNCTIONS" - list all functions
+    - @ref Qore::Pgsql::PGSQL_SQL_LIST_SEQUENCES "PGSQL_SQL_LIST_SEQUENCES" - list all sequences
+    - @ref Qore::Pgsql::PGSQL_SQL_LIST_VIEWS "PGSQL_SQL_LIST_VIEWS" - list all views
+
+    @par Example:
+    @code{.py}
+# List all tables in the current schema
+list<auto> tables = db.selectRows(PGSQL_SQL_LIST_TABLES);
+foreach hash<auto> table in (tables) {
+    printf("Table: %s\n", table.table_name);
+}
+
+# Get column information for a specific table
+list<auto> columns = db.selectRows(PGSQL_SQL_TABLE_COLUMNS, "users");
+foreach hash<auto> col in (columns) {
+    printf("Column: %s (%s)\n", col.column_name, col.data_type);
+}
+    @endcode
+*/
