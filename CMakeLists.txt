@@ -73,6 +73,7 @@ add_custom_target(QPP_GENERATED_FILES DEPENDS ${QPP_SOURCES})
 set(module_name "pgsql")
 
 set(QORE_DOX_TMPL_SRC
+    docs/guide-pgsqlcapabilities.dox.tmpl
   docs/mainpage.dox.tmpl
     docs/guide-pgsqlbind.dox.tmpl
     docs/guide-pgsqlbulkdml.dox.tmpl
@@ -108,6 +109,7 @@ endif()
 list(APPEND QORE_DOXYGEN_MODULES BulkSqlUtil)
 set(MODULE_DOX_INPUT ${CMAKE_CURRENT_BINARY_DIR}/mainpage.dox ${QPP_DOX})
 list(APPEND MODULE_DOX_INPUT
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlcapabilities.dox
     ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlbind.dox
     ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlbulkdml.dox
     ${CMAKE_CURRENT_BINARY_DIR}/guide-pgsqlcopy.dox

@@ -17,34 +17,10 @@
 Datasource ds("pgsql:user/pass@db(utf8)%host");
     @endcode
 
-    This driver supports the following DBI capabilities when compiled against PostgreSQL 7 or better:
-    - \c DBI_CAP_TIME_ZONE_SUPPORT
-    - \c DBI_CAP_TRANSACTION_MANAGEMENT
-    - \c DBI_CAP_CHARSET_SUPPORT
-    - \c DBI_CAP_LOB_SUPPORT
-    - \c DBI_CAP_STORED_PROCEDURES
-    - \c DBI_CAP_BIND_BY_VALUE
-    - \c DBI_CAP_HAS_EXECRAW
-    - \c DBI_CAP_HAS_STATEMENT
-    - \c DBI_CAP_HAS_SELECT_ROW
-    - \c DBI_CAP_HAS_NUMBER_SUPPORT
-    - \c DBI_CAP_HAS_OPTION_SUPPORT
-    - \c DBI_CAP_SERVER_TIME_ZONE
-    - \c DBI_CAP_AUTORECONNECT
-    - \c DBI_CAP_HAS_ARRAY_BIND
-    - \c DBI_CAP_HAS_COLUMNAR_SELECT
-    - \c DBI_CAP_HAS_BULK_LOAD
+    The driver supports transactions, bound parameters, and prepared statements.
+    See @ref pgsqlcapabilitiesguide for supported features and their requirements.
 
     The driver employs efficient binary bindings for all non-text data types and fully supports multidimensional arrays when selecting and binding by value. The driver determines on a per-connection basis by querying server capabilities whether the server uses 8-byte integer or floating-point data for date/time types, and also whether or not a binary day value is included in intervals.
-
-    When built against a %Qore library with columnar DBI support, the driver implements
-    \c Datasource::selectColumnar() and \c SQLStatement::fetchColumnar() to return
-    \c Qore::SQL::ColumnarResult objects suitable for DataFrame and analytical workloads. PostgreSQL \c boolean,
-    integer, floating-point, string-like, and bounded \c numeric(p,s) result columns are returned as dense \c buffer<bool>,
-    \c buffer<int16> / \c buffer<int32> / \c buffer<int64>, \c buffer<float32> / \c buffer<float64>, and
-    \c buffer<string> / \c buffer<decimal128> columns, with nullable buffer variants when SQL \c NULL values are
-    present. PostgreSQL date/time and interval result columns carry logical columnar schema metadata and are stored as
-    microsecond \c buffer<int64> columns when the linked %Qore runtime supports dense temporal column conversion.
 
     The Datasource::getServerVersion() method is implemented for this driver and returns an integer giving the major, minor, and sub version numbers in a single integer according to the following formula:
 
@@ -64,6 +40,7 @@ major_version * 10000 + minor_version * 100 + sub_version
 
     @section pgsqldocumentation Documentation
 
+    - @subpage pgsqlcapabilitiesguide
     - @anchor pgsqloptions @subpage pgsqloptionsguide
     - @anchor pgsqlbind @subpage pgsqlbindguide
     - @anchor pgsqlbulkdml @subpage pgsqlbulkdmlguide

@@ -1,4 +1,2 @@
-For release notes, please see the Doxygen-generated documentation:
-  docs/pgsql/html/index.html (after building with 'make docs')
-
-Or view the release notes section in docs/mainpage.dox.tmpl
+See the pgsql module release notes in the generated Doxygen documentation.
+The authoritative source is docs/guide-pgsqlreleasenotes.dox.tmpl.
