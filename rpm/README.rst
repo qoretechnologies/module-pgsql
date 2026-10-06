@@ -34,3 +34,6 @@ uninstall. ``python3 -B -W error test/test_docs.py build -v`` checks public
 binding API pages and links. Tests and documentation remain enabled for release
 qualification; older PostgreSQL servers and external extensions require their
 own compatibility runs.
+
+Release 2 disables optional Java bindings because the RPM does not ship Java
+artifacts. Native driver, metadata, documentation and database tests are unchanged.

@@ -12,7 +12,7 @@
 %bcond_without docs
 Name: qore-pgsql-module
 Version: 3.5.0
-Release: 1%{?dist}
+Release: 2%{?dist}
 Summary: PostgreSQL database driver for Qore
 License: LGPL-2.1-or-later OR MIT
 URL: https://github.com/qoretechnologies/module-pgsql
@@ -64,6 +64,7 @@ cmake -S . -B build -G 'Unix Makefiles' \
   -DCMAKE_SKIP_RPATH=ON -DCMAKE_IGNORE_PREFIX_PATH=/usr/local \
   -DQore_DIR=%{_libdir}/cmake/Qore -DQORE_EXECUTABLE=/usr/bin/qore \
   -DQORE_QPP_EXECUTABLE=/usr/bin/qpp \
+  -DQORE_GENERATE_JAVA_BINDINGS=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_Doxygen=%{!?with_docs:ON}%{?with_docs:OFF}
 cmake --build build -- %{?_smp_mflags}
 %if %{with docs}
@@ -106,6 +107,9 @@ python3 -B rpm/with-postgres.py -- rpm/run-suites test
 %doc %{_docdir}/%{name}-doc/
 %endif
 %changelog
+* Tue Oct 06 2026 David Nichols <david@qore.org> - 3.5.0-2
+- Disable optional Java generation because the RPM ships no Java artifact.
+
 * Thu Oct 01 2026 David Nichols <david@qore.org> - 3.5.0-1
 - Package the PostgreSQL driver, metadata and complete public API documentation.
 - Run real PostgreSQL database tests in a private offline cluster.
