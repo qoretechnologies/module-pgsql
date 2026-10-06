@@ -37,3 +37,13 @@ own compatibility runs.
 
 Release 2 disables optional Java bindings because the RPM does not ship Java
 artifacts. Native driver, metadata, documentation and database tests are unchanged.
+
+After installing the SDK, repeat the runtime suite and compile the same binding
+and transaction example used by the Debian compiler check::
+
+    qcc -o /tmp/pgsql-compiled rpm/compiler.qr
+    python3 -B -W error rpm/with-postgres.py -- /tmp/pgsql-compiled
+
+Run these commands as an unprivileged user. The example checks the typed integer
+bind, text value and committed query result; database failures return a nonzero
+status. This fixture addition does not change the release 2 RPM payload.

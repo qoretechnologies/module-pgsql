@@ -1,0 +1,14 @@
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# SPDX-License-Identifier: MIT
+%requires pgsql
+
+int sub main() {
+    Datasource db(ENV.QORE_DB_CONNSTR_PGSQL);
+    on_exit db.close();
+    db.exec("create temporary table smoke (id integer, value text)");
+    db.exec("insert into smoke values (%v, %v)", pgsql_bind(PG_TYPE_INT4, 42), "pgsql-aot-ok");
+    db.commit();
+    hash<auto> row = db.selectRow("select id, value from smoke");
+    return row.id == 42 && row.value == "pgsql-aot-ok" ? 0 : 1;
+}
+exit(main());
