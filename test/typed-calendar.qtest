@@ -1,0 +1,50 @@
+#!/usr/bin/env qore
+# Copyright 2026 Qore Technologies, s.r.o.
+%modern
+%requires QUnit
+%try-module pgsql
+%define NoPgsql
+%endtry
+%exec-class TypedCalendar
+class TypedCalendar inherits Test {
+    constructor() : Test("Typed PostgreSQL calendar precision", "1.0", \ARGV) {
+        addTestCase("precision preserves zone qualifiers in scalar and array OIDs", \types());
+        addTestCase("precision-qualified timestamp arrays preserve instants", \instants());
+        set_return_value(main());
+    }
+    private Datasource connection() {
+%ifdef NoPgsql
+        testSkip("pgsql module unavailable");
+%endif
+        if (!ENV.QORE_DB_CONNSTR_PGSQL) { testSkip("set QORE_DB_CONNSTR_PGSQL to a disposable PostgreSQL database"); }
+        return new Datasource(ENV.QORE_DB_CONNSTR_PGSQL);
+    }
+    private static hash<auto> typed(string type_name, auto value) {
+        return {"^pgtype^": type_name, "^value^": value};
+    }
+    private types() {
+        Datasource ds = connection(); on_exit ds.rollback();
+        foreach string kind in (("timestamp", "time")) {
+            foreach string zone in (("with", "without")) {
+                string name = kind + "(6) " + zone + " time zone";
+                string expected = kind + " " + zone + " time zone";
+                auto scalar = typed(name, "2026-01-01 01:30:00.123456+00");
+                if (kind == "time") { scalar = typed(name, "01:30:00.123456+00"); }
+                assertEq(expected, ds.selectRow("select pg_typeof(%v)::text as t", scalar).t);
+                auto array = typed(name + "[]", (scalar."^value^", NULL));
+                assertEq(expected + "[]", ds.selectRow("select pg_typeof(%v)::text as t", array).t);
+            }
+        }
+        assertThrows("DBI:PGSQL:BIND-ERROR", sub() {
+            ds.selectRow("select %v", typed("timestamp(6 with time zone", "2026-01-01"));
+        }); ds.rollback();
+    }
+    private instants() {
+        Datasource ds = connection(); on_exit ds.rollback();
+        ds.setOption("timezone", "America/New_York");
+        ds.selectRow("select pg_catalog.set_config('TimeZone','America/New_York',false)");
+        list<auto> input = (2026-01-01T01:30:00.123456Z, 2026-07-01T01:30:00.234567+03:00, NULL);
+        auto result = ds.selectRow("select %v as dates", typed("timestamp(6) with time zone[]", input)).dates;
+        assertEq(input, result);
+    }
+}

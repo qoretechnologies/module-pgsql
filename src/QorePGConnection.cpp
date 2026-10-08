@@ -1755,7 +1755,15 @@ static Oid resolve_pg_type_name(const char* type_name, bool& is_array, QorePGCon
     const char* paren = strchr(tname.c_str(), '(');
     QoreString base_name;
     if (paren) {
+        const char* close = strchr(paren + 1, ')');
+        if (!close) {
+            xsink->raiseException("DBI:PGSQL:BIND-ERROR", "unterminated type modifier in '%s'", type_name);
+            return (Oid)-1;
+        }
         base_name.concat(tname.c_str(), paren - tname.c_str());
+        // Precision can precede WITH/WITHOUT TIME ZONE. Dropping the suffix
+        // changes timestamptz/timetz binds into their zone-less counterparts.
+        base_name.concat(close + 1);
         base_name.trim();
     } else {
         base_name = tname;

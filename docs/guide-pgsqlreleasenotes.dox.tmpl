@@ -5,6 +5,8 @@
     @tableofcontents
 
     @section pgsql35 pgsql Driver Version 3.5
+    - typed timestamp and time binds with precision retain their WITH TIME ZONE qualifier,
+      preserving offsets in both scalar and array values
 
     - public API documentation includes generated QPP declarations and binding links
     - CMake uninstall honors staging paths and preserves unrelated files and directories
