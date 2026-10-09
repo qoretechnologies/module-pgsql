@@ -441,6 +441,40 @@ private:
     std::atomic<PGcancel*> cancel_obj;
 };
 
+//! A time zone given with the "timezone" option, in the forms understood by both Qore and PostgreSQL
+class QorePGTimeZoneSpec {
+public:
+    //! the zone used to convert date/time values on the client; nullptr = UTC
+    const AbstractQoreZoneInfo* zone = nullptr;
+    //! true for a UTC offset, false for a region name
+    bool is_offset = false;
+    //! the UTC offset in minutes east of UTC (UTC offsets only)
+    int offset_minutes = 0;
+    //! the region name as given (region names only)
+    std::string region;
+    //! the option value as given, for messages
+    std::string name;
+
+    //! Parses and validates a "timezone" option value
+    /** @return 0 for success, -1 for error (exception raised)
+    */
+    DLLLOCAL int parse(const char* value, ExceptionSink* xsink);
+
+    //! Returns the SET TIME ZONE statement for this zone on the given connection
+    /** @return 0 for success, -1 for error (exception raised)
+    */
+    DLLLOCAL int getSql(PGconn* pc, std::string& sql, ExceptionSink* xsink) const;
+
+    //! Returns true if both specifications set the same session zone
+    DLLLOCAL bool sameAs(const QorePGTimeZoneSpec& other) const {
+        return is_offset == other.is_offset && offset_minutes == other.offset_minutes && region == other.region;
+    }
+
+private:
+    DLLLOCAL int parseOffset(const char* value, ExceptionSink* xsink);
+    DLLLOCAL int parseRegion(const char* value, ExceptionSink* xsink);
+};
+
 class QorePGConnection {
 protected:
     Datasource* ds;
@@ -464,6 +498,15 @@ protected:
     // libpq application_name reported to the server (visible in pg_stat_activity.application_name);
     // empty means unset (libpq default applies)
     std::string opt_application_name;
+
+    // true if the "timezone" option was given: the session's zone is then set to session_tz on every connection
+    bool session_tz_set = false;
+    // the zone set on the session when session_tz_set is true
+    QorePGTimeZoneSpec session_tz;
+    // the TimeZone parameter value reported by the server after the zone was set
+    std::string session_tz_reported;
+    // true if the zone was set in a transaction that has not ended yet; PostgreSQL reverts it on rollback
+    bool session_tz_in_trans = false;
 
     // Dynamic extension type OIDs (discovered per-connection from pg_type)
     // 0 means the type is not available (extension not installed)
@@ -625,12 +668,34 @@ public:
         assert(!strcasecmp(opt, DBI_OPT_TIMEZONE));
         assert(val.getType() == NT_STRING);
         QoreStringValueHelper str(val);
-        const AbstractQoreZoneInfo* tz =
-            find_create_timezone(str->c_str(), xsink);
-        if (*xsink)
-            return -1;
-        server_tz = tz;
-        return 0;
+        return setTimeZoneOption(str->c_str(), xsink);
+    }
+
+    //! Sets the declared time zone and the session's zone to the given "timezone" option value
+    /** The declared zone is left unchanged if the value is invalid or cannot be set on the session
+
+        @return 0 for success, -1 for error (exception raised)
+    */
+    DLLLOCAL int setTimeZoneOption(const char* value, ExceptionSink* xsink);
+
+    //! Sets the session's zone to the declared zone after the connection was reestablished
+    /** @return 0 for success (or if no zone was declared), -1 for error (exception raised)
+    */
+    DLLLOCAL int restoreSessionTimeZone(ExceptionSink* xsink);
+
+    //! Sets the declared zone again if a transaction that set it ended and the server reverted it
+    /** @return 0 for success (or if nothing had to be done), -1 for error (exception raised)
+    */
+    DLLLOCAL int checkSessionTimeZone(ExceptionSink* xsink) {
+        if (!session_tz_in_trans || PQtransactionStatus(pc) != PQTRANS_IDLE) {
+            return 0;
+        }
+        session_tz_in_trans = false;
+        const char* current = PQparameterStatus(pc, "TimeZone");
+        if (current && session_tz_reported == current) {
+            return 0;
+        }
+        return applySessionTimeZone(session_tz, xsink);
     }
 
     DLLLOCAL QoreValue getOption(const char* opt) {
@@ -723,6 +788,12 @@ public:
     DLLLOCAL static QoreHashNode* getExceptionArg(const PGresult *res, ExceptionSink *xsink);
 
     DLLLOCAL static void doLostConnectionError(bool in_trans, const PGresult *res, ExceptionSink* xsink);
+
+private:
+    //! Sets the session's zone to the given zone
+    /** @return 0 for success, -1 for error (exception raised)
+    */
+    DLLLOCAL int applySessionTimeZone(const QorePGTimeZoneSpec& spec, ExceptionSink* xsink);
 };
 
 #ifdef HAVE_ARPA_INET_H

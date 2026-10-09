@@ -1,0 +1,234 @@
+#!/usr/bin/env qore
+# Copyright 2026 Qore Technologies, s.r.o.
+%modern
+%requires QUnit
+%prepend-module-path "${SCRIPT_DIR}/../build"
+%requires pgsql
+%exec-class SessionTimeZoneTest
+
+# The "timezone" option declares the zone in which the driver writes and reads plain timestamps; the session must
+# use the same zone, whatever the server's zone is, on every connection and after every reconnect.
+class SessionTimeZoneTest inherits Test {
+    private {
+        # candidate zones: the first whose UTC offset differs from the server session's is used
+        const Regions = ("Asia/Kathmandu", "America/Caracas");
+        const Offsets = ("+05:45", "-03:30");
+
+        # plain timestamps written and read back; the first one does not exist in Central European time
+        const Stamps = (2026-03-29T02:30:00, 2026-10-25T02:30:00.123456, 2026-01-01T00:00:00, 2026-07-01T23:59:59);
+
+        string server_zone;
+        int server_offset;
+    }
+
+    constructor() : Test("PostgreSQL session time zone", "1.0", \ARGV) {
+        addTestCase("a region name sets the session zone", \regionZone());
+        addTestCase("a UTC offset sets the session zone with its sign", \offsetZone());
+        addTestCase("the session zone is restored after a lost connection", \reconnect());
+        addTestCase("every pooled connection uses the declared zone", \pool());
+        addTestCase("changing the option on an open connection changes the session zone", \changeOpen());
+        addTestCase("a rolled back transaction does not revert the declared zone", \rollbackKeepsZone());
+        addTestCase("without the option the session keeps the server's zone", \noOption());
+        addTestCase("invalid zones are rejected with a clear error", \invalidZones());
+        set_return_value(main());
+    }
+
+    private Datasource plain() {
+        if (!ENV.QORE_DB_CONNSTR_PGSQL) {
+            testSkip("set QORE_DB_CONNSTR_PGSQL to a disposable PostgreSQL database");
+        }
+        return new Datasource(ENV.QORE_DB_CONNSTR_PGSQL);
+    }
+
+    private Datasource withZone(string zone) {
+        Datasource ds = plain();
+        ds.setOption("timezone", zone);
+        ds.open();
+        return ds;
+    }
+
+    # returns the server session's zone and its current UTC offset in seconds east
+    private serverZone() {
+        if (server_zone) {
+            return;
+        }
+        Datasource ds = plain(); on_exit ds.close();
+        hash<auto> row = ds.selectRow("select pg_catalog.current_setting('TimeZone') as zone, "
+            "extract(timezone from now())::int as offset");
+        server_zone = row.zone;
+        server_offset = row.offset;
+        ds.rollback();
+    }
+
+    # returns the current UTC offset in seconds east of a region name or of a UTC offset ("+HH:MM" or "-HHMM")
+    private static int utcOffset(string zone) {
+        *list<*string> m = (zone =~ x/^([-+])([0-9]{2}):?([0-9]{2})$/);
+        if (m) {
+            int secs = m[1].toInt() * 3600 + m[2].toInt() * 60;
+            return m[0] == "-" ? -secs : secs;
+        }
+        return new TimeZone(zone).UTCOffset();
+    }
+
+    # returns the first zone whose offset differs from the server session's
+    private string differentZone(list<string> zones) {
+        serverZone();
+        foreach string zone in (zones) {
+            if (utcOffset(zone) != server_offset) {
+                return zone;
+            }
+        }
+        throw "TEST-SETUP-ERROR", sprintf("no candidate zone in %y differs from the server's", zones);
+    }
+
+    # verifies that the session uses the declared zone: plain timestamps round-trip exactly, and server-side
+    # date/time functions use the declared zone
+    private checkSession(Datasource ds, string zone) {
+        ds.exec("create temporary table session_tz_check (id int, ts timestamp, created timestamp default now()) "
+            "on commit drop");
+        foreach date stamp in (Stamps) {
+            ds.exec("insert into session_tz_check (id, ts) values (%v, %v)", $#, stamp);
+        }
+        list<auto> rows = ds.select("select ts from session_tz_check order by id").ts;
+        assertEq(Stamps, rows, zone + ": plain timestamps");
+        hash<auto> row = ds.selectRow("select now() as now, now()::timestamp as local, current_date as today, "
+            "to_char(now(), 'YYYY-MM-DD HH24:MI:SS') as text, "
+            "(select created from session_tz_check limit 1) as created");
+        # the plain timestamp of the current instant read in the declared zone is that instant
+        assertEq(row.now, row.local, zone + ": now()::timestamp");
+        assertEq(row.now, row.created, zone + ": DEFAULT now()");
+        assertEq(row.now.format("YYYY-MM-DD HH:mm:SS"), row.text, zone + ": to_char()");
+        assertEq(row.now.format("YYYY-MM-DD"), row.today.format("YYYY-MM-DD"), zone + ": current_date");
+        ds.commit();
+    }
+
+    private regionZone() {
+        string zone = differentZone(Regions);
+        Datasource ds = withZone(zone); on_exit ds.close();
+        assertEq(zone, ds.getOption("timezone"));
+        assertEq(zone, ds.selectRow("select pg_catalog.current_setting('TimeZone') as zone").zone);
+        ds.commit();
+        checkSession(ds, zone);
+    }
+
+    private offsetZone() {
+        string zone = differentZone(Offsets);
+        Datasource ds = withZone(zone); on_exit ds.close();
+        # an offset east of UTC is a positive extract(timezone)
+        assertEq(utcOffset(zone),
+            ds.selectRow("select extract(timezone from now())::int as offset").offset);
+        ds.commit();
+        checkSession(ds, zone);
+        # "+00:00" is UTC
+        Datasource utc = withZone("+00:00"); on_exit utc.close();
+        assertEq(0, utc.selectRow("select extract(timezone from now())::int as offset").offset);
+        utc.commit();
+        checkSession(utc, "UTC");
+    }
+
+    private reconnect() {
+        string zone = differentZone(Regions);
+        Datasource ds = withZone(zone); on_exit ds.close();
+        int pid = ds.selectRow("select pg_catalog.pg_backend_pid() as pid").pid;
+        ds.commit();
+        terminate(pid);
+        # no transaction is in progress, so the driver reconnects and runs the statement again
+        hash<auto> row = ds.selectRow("select pg_catalog.pg_backend_pid() as pid, "
+            "pg_catalog.current_setting('TimeZone') as zone");
+        assertNeq(pid, row.pid, "the connection was reestablished");
+        assertEq(zone, row.zone);
+        ds.commit();
+        checkSession(ds, zone);
+    }
+
+    # terminates a backend from another connection and waits for it to exit
+    private terminate(int pid) {
+        Datasource admin = plain(); on_exit admin.close();
+        # with a timeout, pg_terminate_backend() returns once the backend has exited
+        assertTrue(admin.selectRow("select pg_catalog.pg_terminate_backend(%v, 60000) as done", pid).done);
+        admin.commit();
+    }
+
+    private pool() {
+        string zone = differentZone(Offsets);
+        plain();
+        DatasourcePool pool(ENV.QORE_DB_CONNSTR_PGSQL + "{min=2,max=2,timezone=" + zone + "}");
+        # hold two connections at once so both pooled connections are checked
+        Counter ready(2);
+        Counter done(1);
+        list<auto> zones = ();
+        Mutex m();
+        code check = sub () {
+            on_exit pool.commit();
+            int offset = pool.selectRow("select extract(timezone from now())::int as offset").offset;
+            m.lock(); zones += offset; m.unlock();
+            ready.dec();
+            done.waitForZero();
+        };
+        background check();
+        background check();
+        ready.waitForZero();
+        done.dec();
+        int expected = utcOffset(zone);
+        assertEq((expected, expected), zones);
+    }
+
+    private changeOpen() {
+        string zone = differentZone(Regions);
+        Datasource ds = plain(); on_exit ds.close();
+        ds.open();
+        ds.setOption("timezone", zone);
+        assertEq(zone, ds.selectRow("select pg_catalog.current_setting('TimeZone') as zone").zone);
+        ds.commit();
+        checkSession(ds, zone);
+        string offset = differentZone(Offsets);
+        ds.setOption("timezone", offset);
+        assertEq(utcOffset(offset),
+            ds.selectRow("select extract(timezone from now())::int as offset").offset);
+        ds.commit();
+        checkSession(ds, offset);
+    }
+
+    private rollbackKeepsZone() {
+        string zone = differentZone(Regions);
+        Datasource ds = plain(); on_exit ds.close();
+        ds.beginTransaction();
+        ds.exec("create temporary table session_tz_rollback (id int) on commit drop");
+        ds.setOption("timezone", zone);
+        assertEq(zone, ds.selectRow("select pg_catalog.current_setting('TimeZone') as zone").zone);
+        ds.rollback();
+        # PostgreSQL reverts a SET made in a transaction that is rolled back; the declared zone must remain
+        assertEq(zone, ds.selectRow("select pg_catalog.current_setting('TimeZone') as zone").zone);
+        ds.commit();
+        checkSession(ds, zone);
+    }
+
+    private noOption() {
+        serverZone();
+        Datasource ds = plain(); on_exit ds.close();
+        hash<auto> row = ds.selectRow("select setting, reset_val from pg_catalog.pg_settings "
+            "where name = 'TimeZone'");
+        assertEq(server_zone, row.setting);
+        # the driver issued no SET: the session still has the zone it started with
+        assertEq(row.reset_val, row.setting);
+        assertEq(TimeZone::get().region(), ds.getOption("timezone"));
+        ds.commit();
+    }
+
+    private invalidZones() {
+        plain();
+        foreach string zone in (("Bogus/Zone", "UTC'; drop table x; --", "Europe/../Prague", "/etc/localtime",
+                "Europe/Prague ", "", "+01:75", "+01:00:30", "+1", "-0a:00")) {
+            Datasource ds = plain();
+            assertThrows("DBI:PGSQL:TIMEZONE-ERROR", sub () { ds.setOption("timezone", zone); ds.open(); },
+                NOTHING, sprintf("%y", zone));
+        }
+        # an invalid value on an open connection leaves the declared and session zones unchanged
+        string zone = differentZone(Regions);
+        Datasource ds = withZone(zone); on_exit ds.close();
+        assertThrows("DBI:PGSQL:TIMEZONE-ERROR", \ds.setOption(), ("timezone", "Bogus/Zone"));
+        assertEq(zone, ds.getOption("timezone"));
+        assertEq(zone, ds.selectRow("select pg_catalog.current_setting('TimeZone') as zone").zone);
+        ds.commit();
+    }
+}

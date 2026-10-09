@@ -5,6 +5,17 @@
     @tableofcontents
 
     @section pgsql35 pgsql Driver Version 3.5
+    - the \c "timezone" option now also sets the session's time zone on the server, when the connection is
+      opened (including every connection in a \c DatasourcePool), when it is reestablished after it was lost,
+      and when the option is changed on an open connection; previously the option only told the driver which
+      zone the server used, so a connection whose option did not match the server's zone stored and returned
+      plain \c timestamp values shifted by the difference.  Such connections now get consistent timestamp data,
+      and server-side date/time functions (\c now()::timestamp, \c current_date, \c date_trunc(),
+      \c to_char(), and column defaults such as <tt>DEFAULT now()</tt>) now use the declared zone on them.
+      Connections without the option are unchanged
+    - UTC offsets in the \c "timezone" option (ex: \c "+01:00") work; they are set on the server as offsets
+      east of UTC, as in %Qore.  An invalid zone raises a \c DBI:PGSQL:TIMEZONE-ERROR exception and the
+      connection is not opened
     - typed timestamp and time binds with precision retain their WITH TIME ZONE qualifier,
       preserving offsets in both scalar and array values
 

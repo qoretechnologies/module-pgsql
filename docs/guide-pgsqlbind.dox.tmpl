@@ -24,7 +24,7 @@
 
     @section pgsql_timezone Time Zone Support
 
-    The driver now sets the server's time zone rules when the connection is established; this is taken from the current time zone settings of the calling Program object and can also be overridden/changed by setting the \c "timezone" driver option (see @ref pgsqloptionsguide).
+    The driver uses the current time zone settings of the calling Program object as the connection's time zone; this can be overridden/changed by setting the \c "timezone" driver option (see @ref pgsqloptionsguide).  When the \c "timezone" option is set, it is also set as the session's time zone on the server on every connection and reconnection, so that the server converts date/time values in the same zone as the driver.  When it is not set, the session keeps the server's time zone, which must then be the same as the client's for plain \c timestamp values to be stored and read back unchanged.
 
     All date/time values bound by value are converted to the server's time zone before binding to ensure that date/time values are stored correctly in the server.
 

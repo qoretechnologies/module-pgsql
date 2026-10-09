@@ -112,6 +112,134 @@ static PGconn* pgsql_connect_with_interrupt_check(const char* str, ExceptionSink
     return PQconnectdb(str);
 }
 
+//------------------------------------------------------------------------------
+// QorePGTimeZoneSpec implementation
+//------------------------------------------------------------------------------
+
+// the longest region name accepted; IANA names are far shorter
+#define QPG_MAX_TZ_REGION_LEN 255
+
+static void qpg_tz_error(ExceptionSink* xsink, const char* value, const char* reason) {
+    xsink->raiseException("DBI:PGSQL:TIMEZONE-ERROR", "invalid \"timezone\" option value '%s': %s; expecting a time "
+        "zone region name (ex: \"Europe/Prague\") or a UTC offset in whole minutes (ex: \"+01:00\" or \"-05:30\")",
+        value, reason);
+}
+
+int QorePGTimeZoneSpec::parse(const char* value, ExceptionSink* xsink) {
+    assert(value);
+    name = value;
+    if (*value == '+' || *value == '-') {
+        return parseOffset(value, xsink);
+    }
+    return parseRegion(value, xsink);
+}
+
+int QorePGTimeZoneSpec::parseOffset(const char* value, ExceptionSink* xsink) {
+    // [+-]HH[[:]MM[[:]SS]]: the format accepted by Qore for UTC offsets
+    int parts[3] = {0, 0, 0};
+    int count = 0;
+    const char* p = value + 1;
+    while (true) {
+        if (!isdigit(static_cast<unsigned char>(p[0])) || !isdigit(static_cast<unsigned char>(p[1]))) {
+            qpg_tz_error(xsink, value, "each part of a UTC offset must have exactly two digits");
+            return -1;
+        }
+        parts[count++] = (p[0] - '0') * 10 + (p[1] - '0');
+        p += 2;
+        if (!*p) {
+            break;
+        }
+        if (count == 3) {
+            qpg_tz_error(xsink, value, "excess text after the seconds of the UTC offset");
+            return -1;
+        }
+        if (*p == ':') {
+            ++p;
+        }
+    }
+    if (parts[1] > 59 || parts[2] > 59) {
+        qpg_tz_error(xsink, value, "the minutes and seconds of a UTC offset must be less than 60");
+        return -1;
+    }
+    if (parts[2]) {
+        qpg_tz_error(xsink, value, "PostgreSQL supports UTC offsets in whole minutes only");
+        return -1;
+    }
+    is_offset = true;
+    offset_minutes = parts[0] * 60 + parts[1];
+    if (*value == '-') {
+        offset_minutes = -offset_minutes;
+    }
+    // nullptr (UTC) for a zero offset
+    zone = findCreateOffsetZone(offset_minutes * 60);
+    return 0;
+}
+
+int QorePGTimeZoneSpec::parseRegion(const char* value, ExceptionSink* xsink) {
+    // IANA region names: letters, digits, '/', '_', '-' and '+', starting with a letter, with no empty
+    // component; this also excludes file paths, which Qore would load but PostgreSQL does not accept
+    size_t len = strlen(value);
+    if (!len) {
+        qpg_tz_error(xsink, value, "the value is empty");
+        return -1;
+    }
+    if (len > QPG_MAX_TZ_REGION_LEN) {
+        qpg_tz_error(xsink, value, "the region name is too long");
+        return -1;
+    }
+    if (!isalpha(static_cast<unsigned char>(*value))) {
+        qpg_tz_error(xsink, value, "a region name must start with a letter");
+        return -1;
+    }
+    for (const char* p = value; *p; ++p) {
+        unsigned char c = static_cast<unsigned char>(*p);
+        if (c == '/') {
+            if (p[1] == '/' || !p[1]) {
+                qpg_tz_error(xsink, value, "a region name cannot have an empty component");
+                return -1;
+            }
+            continue;
+        }
+        if (!isalnum(c) && c != '_' && c != '-' && c != '+') {
+            qpg_tz_error(xsink, value, "a region name may only contain letters, digits, '/', '_', '-' and '+'");
+            return -1;
+        }
+    }
+    ExceptionSink lookup_xsink;
+    const AbstractQoreZoneInfo* tz = find_create_timezone(value, &lookup_xsink);
+    if (lookup_xsink) {
+        lookup_xsink.clear();
+        qpg_tz_error(xsink, value, "the region is unknown on the client (no zoneinfo data could be loaded for it)");
+        return -1;
+    }
+    is_offset = false;
+    region = value;
+    zone = tz;
+    return 0;
+}
+
+int QorePGTimeZoneSpec::getSql(PGconn* pc, std::string& sql, ExceptionSink* xsink) const {
+    if (is_offset) {
+        // a quoted offset is a POSIX zone, where the sign is inverted (positive is west of UTC); an INTERVAL is
+        // an offset east of UTC as in Qore
+        int abs_minutes = offset_minutes < 0 ? -offset_minutes : offset_minutes;
+        QoreStringMaker str("SET TIME ZONE INTERVAL '%c%02d:%02d' HOUR TO MINUTE", offset_minutes < 0 ? '-' : '+',
+            abs_minutes / 60, abs_minutes % 60);
+        sql = str.c_str();
+        return 0;
+    }
+    std::unique_ptr<char, decltype(&PQfreemem)> literal(PQescapeLiteral(pc, region.c_str(), region.size()),
+        PQfreemem);
+    if (!literal) {
+        xsink->raiseException("DBI:PGSQL:TIMEZONE-ERROR", "cannot quote time zone region '%s': %s", region.c_str(),
+            PQerrorMessage(pc));
+        return -1;
+    }
+    sql = "SET TIME ZONE ";
+    sql += literal.get();
+    return 0;
+}
+
 // declare static members
 qore_pg_data_map_t QorePgsqlStatement::data_map;
 qore_pg_array_data_map_t QorePgsqlStatement::array_data_map;
@@ -2934,7 +3062,8 @@ int QorePgsqlStatement::execIntern(const char* sql, ExceptionSink* xsink) {
     ExecStatusType rc = PQresultStatus(res);
     //printd(5, "QorePgsqlStatement::execIntern() rc: %d\n", rc);
     if (rc == PGRES_COMMAND_OK || rc == PGRES_TUPLES_OK) {
-        return 0;
+        // a transaction that set the declared zone may have just ended
+        return conn->checkSessionTimeZone(xsink);
     }
 
     bool lost_connection = false;
@@ -2962,6 +3091,13 @@ int QorePgsqlStatement::execIntern(const char* sql, ExceptionSink* xsink) {
 
             PQreset(conn->get());
 
+            // a new session has the server's default zone; set the declared zone before anything else runs
+            if (PQstatus(conn->get()) == CONNECTION_OK && conn->restoreSessionTimeZone(xsink)) {
+                PQclear(res);
+                res = nullptr;
+                return -1;
+            }
+
             // only execute again if the connection was not aborted while in a transaction
             if (!in_trans) {
                 // Check for interrupt before re-executing query
@@ -2980,7 +3116,12 @@ int QorePgsqlStatement::execIntern(const char* sql, ExceptionSink* xsink) {
         }
     }
 
-    return conn->checkClearResult(lost_connection, res, xsink);
+    int result = conn->checkClearResult(lost_connection, res, xsink);
+    // a failed statement can also end a transaction that set the declared zone (ex: a failed commit)
+    if (PQstatus(conn->get()) == CONNECTION_OK && conn->checkSessionTimeZone(xsink)) {
+        return -1;
+    }
+    return result;
 }
 
 int QorePgsqlStatement::exec(const QoreString* str, const QoreListNode* args, ExceptionSink *xsink) {
@@ -3060,6 +3201,15 @@ QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink
             if (!v.isNothing()) {
                 QoreStringValueHelper str(v);
                 opt_application_name = str->c_str();
+            }
+            // the declared zone is validated before connecting and set on the session once connected
+            v = opths->getKeyValue(DBI_OPT_TIMEZONE);
+            if (!v.isNothing()) {
+                QoreStringValueHelper str(v);
+                if (session_tz.parse(str->c_str(), xsink)) {
+                    return;
+                }
+                session_tz_set = true;
             }
         }
     }
@@ -3152,6 +3302,15 @@ QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink
     }
 
     PQsetNoticeProcessor(pc, custom_notice_processor, this);
+
+    // set the declared zone on the session, so that the server converts date/time values in the same zone as
+    // the driver; the open fails if the server does not accept it
+    if (!*xsink && session_tz_set) {
+        if (applySessionTimeZone(session_tz, xsink)) {
+            return;
+        }
+        server_tz = session_tz.zone;
+    }
 
     // Discover extension types (pgvector, etc.) - non-fatal if it fails
     if (!*xsink) {
@@ -3265,6 +3424,62 @@ QorePGConnection::~QorePGConnection() {
 #endif
     if (pc)
         PQfinish(pc);
+}
+
+int QorePGConnection::setTimeZoneOption(const char* value, ExceptionSink* xsink) {
+    QorePGTimeZoneSpec spec;
+    if (spec.parse(value, xsink)) {
+        return -1;
+    }
+    // the value set when the connection was opened is set again by the DBI layer right after opening
+    if (!session_tz_set || !spec.sameAs(session_tz)) {
+        if (applySessionTimeZone(spec, xsink)) {
+            return -1;
+        }
+    }
+    session_tz = spec;
+    session_tz_set = true;
+    server_tz = spec.zone;
+    return 0;
+}
+
+int QorePGConnection::restoreSessionTimeZone(ExceptionSink* xsink) {
+    if (!session_tz_set) {
+        return 0;
+    }
+    return applySessionTimeZone(session_tz, xsink);
+}
+
+int QorePGConnection::applySessionTimeZone(const QorePGTimeZoneSpec& spec, ExceptionSink* xsink) {
+    std::string sql;
+    if (spec.getSql(pc, sql, xsink)) {
+        return -1;
+    }
+    if (qore_check_cancel(xsink)) {
+        return -1;
+    }
+    std::unique_ptr<PGresult, decltype(&PQclear)> res(nullptr, PQclear);
+    {
+        QorePGCancelHelper cancel_helper(pc);
+        res.reset(PQexec(pc, sql.c_str()));
+    }
+    if (PQresultStatus(res.get()) != PGRES_COMMAND_OK) {
+        const char* err = PQerrorMessage(pc);
+        if (!strncmp(err, "ERROR:  ", 8) || !strncmp(err, "FATAL:  ", 8)) {
+            err += 8;
+        }
+        QoreStringNode* desc = new QoreStringNode;
+        desc->sprintf("%s: cannot set the session time zone to '%s': %s", server_desc.c_str(), spec.name.c_str(),
+            err);
+        desc->chomp();
+        xsink->raiseException("DBI:PGSQL:TIMEZONE-ERROR", desc);
+        return -1;
+    }
+    const char* reported = PQparameterStatus(pc, "TimeZone");
+    session_tz_reported = reported ? reported : "";
+    // PostgreSQL reverts a SET made in a transaction that is rolled back
+    session_tz_in_trans = PQtransactionStatus(pc) != PQTRANS_IDLE;
+    return 0;
 }
 
 int QorePGConnection::commit(ExceptionSink *xsink) {
