@@ -678,10 +678,13 @@ public:
     */
     DLLLOCAL int setTimeZoneOption(const char* value, ExceptionSink* xsink);
 
-    //! Sets the session's zone to the declared zone after the connection was reestablished
-    /** @return 0 for success (or if no zone was declared), -1 for error (exception raised)
+    //! Restores the session settings made after connecting once the connection was reestablished with PQreset()
+    /** libpq reconnects with the connection string's parameters only, so the client encoding and the declared
+        time zone, which are set after connecting, have to be set again
+
+        @return 0 for success, -1 for error (exception raised)
     */
-    DLLLOCAL int restoreSessionTimeZone(ExceptionSink* xsink);
+    DLLLOCAL int restoreSession(ExceptionSink* xsink);
 
     //! Sets the declared zone again if a transaction that set it ended and the server reverted it
     /** @return 0 for success (or if nothing had to be done), -1 for error (exception raised)

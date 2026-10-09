@@ -16,6 +16,9 @@
     - UTC offsets in the \c "timezone" option (ex: \c "+01:00") work; they are set on the server as offsets
       east of UTC, as in %Qore.  An invalid zone raises a \c DBI:PGSQL:TIMEZONE-ERROR exception and the
       connection is not opened
+    - a connection reestablished after it was lost keeps the datasource's character encoding; previously it
+      used the database's default encoding, so strings were sent and read in the wrong encoding after the
+      reconnect when the datasource's encoding differed from the database's
     - typed timestamp and time binds with precision retain their WITH TIME ZONE qualifier,
       preserving offsets in both scalar and array values
 

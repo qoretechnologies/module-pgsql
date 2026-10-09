@@ -25,6 +25,7 @@ class SessionTimeZoneTest inherits Test {
         addTestCase("a region name sets the session zone", \regionZone());
         addTestCase("a UTC offset sets the session zone with its sign", \offsetZone());
         addTestCase("the session zone is restored after a lost connection", \reconnect());
+        addTestCase("the client encoding is restored after a lost connection", \encodingReconnect());
         addTestCase("every pooled connection uses the declared zone", \pool());
         addTestCase("changing the option on an open connection changes the session zone", \changeOpen());
         addTestCase("a rolled back transaction does not revert the declared zone", \rollbackKeepsZone());
@@ -147,6 +148,31 @@ class SessionTimeZoneTest inherits Test {
         # with a timeout, pg_terminate_backend() returns once the backend has exited
         assertTrue(admin.selectRow("select pg_catalog.pg_terminate_backend(%v, 60000) as done", pid).done);
         admin.commit();
+    }
+
+    private encodingReconnect() {
+        plain();
+        # a client encoding that differs from the database's (UTF8 for a default test database)
+        hash<auto> config = parse_datasource(ENV.QORE_DB_CONNSTR_PGSQL);
+        config.charset = "latin1";
+        Datasource ds(config); on_exit ds.close();
+        ds.open();
+        string text = "Ünïcödé àéîõü";
+        hash<auto> row = ds.selectRow("select pg_catalog.pg_backend_pid() as pid, "
+            "pg_catalog.current_setting('client_encoding') as enc, %v::text as str", text);
+        assertEq("LATIN1", row.enc, "before the reconnect");
+        assertEq(text, row.str, "before the reconnect");
+        int pid = row.pid;
+        ds.commit();
+        terminate(pid);
+        # no transaction is in progress, so the driver reconnects and runs the statement again
+        row = ds.selectRow("select pg_catalog.pg_backend_pid() as pid, "
+            "pg_catalog.current_setting('client_encoding') as enc, %v::text as str", text);
+        assertNeq(pid, row.pid, "the connection was reestablished");
+        assertEq("LATIN1", row.enc, "after the reconnect");
+        assertEq("ISO-8859-1", row.str.encoding());
+        assertEq(text, row.str, "after the reconnect");
+        ds.commit();
     }
 
     private pool() {

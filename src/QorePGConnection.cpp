@@ -3091,8 +3091,9 @@ int QorePgsqlStatement::execIntern(const char* sql, ExceptionSink* xsink) {
 
             PQreset(conn->get());
 
-            // a new session has the server's default zone; set the declared zone before anything else runs
-            if (PQstatus(conn->get()) == CONNECTION_OK && conn->restoreSessionTimeZone(xsink)) {
+            // a new session has the server's default client encoding and zone; set the connection's own before
+            // anything else runs
+            if (PQstatus(conn->get()) == CONNECTION_OK && conn->restoreSession(xsink)) {
                 PQclear(res);
                 res = nullptr;
                 return -1;
@@ -3443,7 +3444,15 @@ int QorePGConnection::setTimeZoneOption(const char* value, ExceptionSink* xsink)
     return 0;
 }
 
-int QorePGConnection::restoreSessionTimeZone(ExceptionSink* xsink) {
+int QorePGConnection::restoreSession(ExceptionSink* xsink) {
+    if (PQsetClientEncoding(pc, ds->getDBEncoding())) {
+        QoreStringNode* desc = new QoreStringNode;
+        desc->sprintf("%s: cannot set the client encoding to '%s' after reconnecting: %s", server_desc.c_str(),
+            ds->getDBEncoding(), PQerrorMessage(pc));
+        desc->chomp();
+        xsink->raiseException("DBI:PGSQL:ENCODING-ERROR", desc);
+        return -1;
+    }
     if (!session_tz_set) {
         return 0;
     }
