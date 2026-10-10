@@ -33,10 +33,13 @@
 #include <winsock2.h>
 #else
 #include <sys/socket.h>
+#include <poll.h>
 #endif
 
 #include <string.h>
 #include <stdlib.h>
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <limits>
 #include <ctype.h>
@@ -104,13 +107,73 @@ QorePGCancelHelper::~QorePGCancelHelper() {
     }
 }
 
-// Helper function to check for interrupt before connection attempt
-static PGconn* pgsql_connect_with_interrupt_check(const char* str, ExceptionSink* xsink) {
+#ifdef _QORE_HAS_CANCELLABLE_POLL
+// connects to the server with PQconnectStart() and PQconnectPoll(), waiting on the connection's socket with
+// qore_cancellable_poll(), so that a cancelled thread or an interrupted program ends a connection attempt as soon as
+// it is requested; PQconnectdb() blocks until the server answers or the connection attempt times out, which can be
+// never.  libpq does not apply connect_timeout to a connection made this way, so the timeout is applied here, with
+// the same exception as from PQconnectdb().  Returns nullptr only if an exception was raised; otherwise the caller
+// checks the status of the connection returned
+static PGconn* pgsql_connect_cancellable(const char* conninfo, int connect_timeout_s, ExceptionSink* xsink) {
     if (qore_check_cancel(xsink)) {
         return nullptr;
     }
-    return PQconnectdb(str);
+    PGconn* pc = PQconnectStart(conninfo);
+    if (!pc) {
+        xsink->raiseException("DBI:PGSQL:ERROR", "the PostgreSQL client library could not allocate a connection");
+        return nullptr;
+    }
+    // the absolute deadline in ms (monotonic), or -1 for no timeout
+    int64 deadline = connect_timeout_s > 0
+        ? q_clock_getmicros_monotonic() / 1000 + static_cast<int64>(connect_timeout_s) * 1000 : -1;
+    // the first wait is for the socket to become writable, as with PQconnectPoll() after PQconnectStart()
+    PostgresPollingStatusType st = PGRES_POLLING_WRITING;
+    while (PQstatus(pc) != CONNECTION_BAD && st != PGRES_POLLING_OK && st != PGRES_POLLING_FAILED) {
+        int timeout_ms = -1;
+        if (deadline >= 0) {
+            int64 remaining = deadline - q_clock_getmicros_monotonic() / 1000;
+            if (remaining <= 0) {
+                // the same exception as for a connect_timeout in PQconnectdb(), with libpq's message
+                PQfinish(pc);
+                xsink->raiseException("DBI:PGSQL:ERROR", "timeout expired");
+                return nullptr;
+            }
+            timeout_ms = remaining > INT_MAX ? INT_MAX : static_cast<int>(remaining);
+        }
+        struct pollfd pfd;
+        pfd.fd = PQsocket(pc);
+        pfd.events = st == PGRES_POLLING_READING ? POLLIN : POLLOUT;
+        pfd.revents = 0;
+        int rc = qore_cancellable_poll(&pfd, 1, timeout_ms, xsink, "connecting to the PostgreSQL server");
+        if (rc == QORE_POLL_CANCELLED) {
+            PQfinish(pc);
+            return nullptr;
+        }
+        if (rc < 0) {
+            int err = errno;
+            PQfinish(pc);
+            xsink->raiseErrnoException("DBI:PGSQL:ERROR", err, "error waiting for the connection to the PostgreSQL "
+                "server");
+            return nullptr;
+        }
+        if (!rc) {
+            // the timeout expired; checked at the top of the loop
+            continue;
+        }
+        st = PQconnectPoll(pc);
+    }
+    return pc;
 }
+#else
+// with an older Qore library without a cancellable wait, the connection is checked for a cancellation before it is
+// made, and the connection attempt cannot be interrupted
+static PGconn* pgsql_connect_cancellable(const char* conninfo, int connect_timeout_s, ExceptionSink* xsink) {
+    if (qore_check_cancel(xsink)) {
+        return nullptr;
+    }
+    return PQconnectdb(conninfo);
+}
+#endif
 
 //------------------------------------------------------------------------------
 // QorePGTimeZoneSpec implementation
@@ -3253,7 +3316,7 @@ QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink
         conninfo.sprintf(" application_name='%s'", appname_esc.c_str());
     }
 
-    pc = pgsql_connect_with_interrupt_check(conninfo.c_str(), xsink);
+    pc = pgsql_connect_cancellable(conninfo.c_str(), opt_connect_timeout, xsink);
 
     // Check if connection was interrupted or failed
     if (!pc || PQstatus(pc) != CONNECTION_OK) {

@@ -1,0 +1,146 @@
+#!/usr/bin/env qore
+# Copyright 2026 Qore Technologies, s.r.o.
+%modern
+%requires QUnit
+%prepend-module-path "${SCRIPT_DIR}/../build"
+%requires pgsql
+%exec-class PgsqlConnectCancelTest
+
+# A connection attempt to a server that accepts the connection but never answers blocks in libpq; a cancelled thread
+# or an interrupted Program must end it at once, and the connect-timeout option must still end it in time.  No
+# PostgreSQL server is needed: the "server" is a socket that accepts connections and never sends anything.
+class PgsqlConnectCancelTest inherits Test {
+    private {
+        #! the longest time in microseconds that a cancelled connection attempt may take to end
+        const MaxCancelUs = 2000000;
+    }
+
+    constructor() : Test("PostgreSQL connection cancellation", "1.0", \ARGV) {
+        addTestCase("a cancelled thread ends a blocked connection attempt", \cancelBlockedConnect());
+        addTestCase("connect-timeout ends a blocked connection attempt", \connectTimeout());
+        addTestCase("an interrupted Program ends a blocked connection attempt", \interruptBlockedConnect());
+        set_return_value(main());
+    }
+
+    #! starts a server that accepts connections and never answers; returns the server, its port, and a queue that
+    #! receives an entry for each connection accepted
+    private hash<auto> startSilentServer() {
+        Socket server();
+        server.bind("127.0.0.1:0", True);
+        server.listen();
+        int port = server.getSocketInfo().port;
+        Queue accepted();
+        # the accepted sockets are kept open until the server is closed
+        Counter running(1);
+        background sub () {
+            on_exit running.dec();
+            list<Socket> conns = ();
+            while (True) {
+                *Socket s;
+                try {
+                    s = server.accept(100ms);
+                } catch (hash<ExceptionInfo> ex) {
+                    break;
+                }
+                if (s) {
+                    conns += s;
+                    accepted.push(True);
+                }
+            }
+        }();
+        return {"server": server, "port": port, "accepted": accepted, "running": running};
+    }
+
+    private stopSilentServer(hash<auto> srv) {
+        srv.server.shutdown();
+        srv.server.close();
+        srv.running.waitForZero();
+    }
+
+    #! returns a datasource for the silent server
+    private Datasource getDatasource(int port, *int connect_timeout) {
+        hash<auto> opts = {
+            "type": "pgsql",
+            "user": "nobody",
+            "pass": "nothing",
+            "db": "nothing",
+            "host": "127.0.0.1",
+            "port": port,
+        };
+        if (connect_timeout) {
+            opts.options = {"connect-timeout": connect_timeout};
+        }
+        return new Datasource(opts);
+    }
+
+    cancelBlockedConnect() {
+        hash<auto> srv = startSilentServer();
+        on_exit stopSilentServer(srv);
+        Queue started();
+        Queue done();
+        int tid = background sub () {
+            hash<auto> rv;
+            try {
+                Datasource ds = getDatasource(srv.port, 60);
+                started.push(True);
+                ds.open();
+                rv.err = "NONE";
+            } catch (hash<ExceptionInfo> ex) {
+                rv.err = ex.err;
+                rv.desc = ex.desc;
+            }
+            rv.end = clock_get_monotonic_us();
+            done.push(rv);
+        }();
+        started.get();
+        # the connection is blocked once the server has accepted it
+        srv.accepted.get();
+        int start = clock_get_monotonic_us();
+        cancel_thread(tid, "pgsql connect test");
+        hash<auto> rv = done.get();
+        assertEq("THREAD-CANCELLED", rv.err, rv.desc);
+        assertLt(MaxCancelUs, rv.end - start, "the cancellation ends the connection attempt at once");
+    }
+
+    connectTimeout() {
+        hash<auto> srv = startSilentServer();
+        on_exit stopSilentServer(srv);
+        Datasource ds = getDatasource(srv.port, 1);
+        int start = clock_get_monotonic_us();
+        # the same exception as for a timeout in libpq's blocking connection
+        assertThrows("DBI:PGSQL:ERROR", "timeout expired", \ds.open());
+        int us = clock_get_monotonic_us() - start;
+        assertGe(1000000, us, "the timeout is applied");
+        assertLt(1000000 + MaxCancelUs, us, "the connection attempt ends when the timeout expires");
+    }
+
+    interruptBlockedConnect() {
+        hash<auto> srv = startSilentServer();
+        on_exit stopSilentServer(srv);
+        SandboxManager sm();
+        Program p(PO_NEW_STYLE);
+        p.setSandboxManager(sm);
+        p.parse(sprintf("%%requires pgsql\nsub run() { Datasource ds({\"type\": \"pgsql\", \"user\": \"nobody\", "
+            "\"pass\": \"nothing\", \"db\": \"nothing\", \"host\": \"127.0.0.1\", \"port\": %d, \"options\": "
+            "{\"connect-timeout\": 60}}); ds.open(); }", srv.port), "pgsql-connect-interrupt");
+        Queue done();
+        background sub () {
+            hash<auto> rv;
+            try {
+                p.callFunction("run");
+                rv.err = "NONE";
+            } catch (hash<ExceptionInfo> ex) {
+                rv.err = ex.err;
+                rv.desc = ex.desc;
+            }
+            rv.end = clock_get_monotonic_us();
+            done.push(rv);
+        }();
+        srv.accepted.get();
+        int start = clock_get_monotonic_us();
+        sm.requestInterrupt();
+        hash<auto> rv = done.get();
+        assertEq("PROGRAM-INTERRUPTED", rv.err, rv.desc);
+        assertLt(MaxCancelUs, rv.end - start);
+    }
+}

@@ -5,6 +5,10 @@
     @tableofcontents
 
     @section pgsql35 pgsql Driver Version 3.5
+    - a connection attempt ends as soon as its thread is cancelled or its %Qore \c Program is interrupted
+      (\c THREAD-CANCELLED or \c PROGRAM-INTERRUPTED), including while the server has accepted the connection but
+      does not answer; previously it could only end when the server answered or the \c "connect-timeout" expired,
+      or never without that option.  The \c "connect-timeout" option ends a connection attempt as before
     - the \c "timezone" option now also sets the session's time zone on the server, when the connection is
       opened (including every connection in a \c DatasourcePool), when it is reestablished after it was lost,
       and when the option is changed on an open connection; previously the option only told the driver which
