@@ -2,12 +2,14 @@
 # Copyright 2026 Qore Technologies, s.r.o.
 %modern
 %requires QUnit
+%requires Util
 %prepend-module-path "${SCRIPT_DIR}/../build"
 %requires pgsql
 %exec-class SessionTimeZoneTest
 
-# The "timezone" option declares the zone in which the driver writes and reads plain timestamps; the session must
-# use the same zone, whatever the server's zone is, on every connection and after every reconnect.
+# The "timezone" option declares the zone in which the driver writes and reads plain timestamps; without it, that is
+# the zone of the Program that opens the connection.  The session must use the same zone, whatever the server's zone
+# is, on every connection and after every reconnect.
 class SessionTimeZoneTest inherits Test {
     private {
         # candidate zones: the first whose UTC offset differs from the server session's is used
@@ -29,7 +31,9 @@ class SessionTimeZoneTest inherits Test {
         addTestCase("every pooled connection uses the declared zone", \pool());
         addTestCase("changing the option on an open connection changes the session zone", \changeOpen());
         addTestCase("a rolled back transaction does not revert the declared zone", \rollbackKeepsZone());
-        addTestCase("without the option the session keeps the server's zone", \noOption());
+        addTestCase("without the option the session uses the Program's zone", \programZone());
+        addTestCase("a zone loaded from a file is set by its region name", \fileZone());
+        addTestCase("a zone without a region name keeps the session's zone", \unnamedZone());
         addTestCase("invalid zones are rejected with a clear error", \invalidZones());
         set_return_value(main());
     }
@@ -48,14 +52,15 @@ class SessionTimeZoneTest inherits Test {
         return ds;
     }
 
-    # returns the server session's zone and its current UTC offset in seconds east
+    # returns the zone that a session starts with (the server's, or the client's PGTZ), which the driver replaces
+    # with the connection's zone, and its current UTC offset in seconds east
     private serverZone() {
         if (server_zone) {
             return;
         }
         Datasource ds = plain(); on_exit ds.close();
-        hash<auto> row = ds.selectRow("select pg_catalog.current_setting('TimeZone') as zone, "
-            "extract(timezone from now())::int as offset");
+        hash<auto> row = ds.selectRow("select reset_val as zone, extract(epoch from (now() at time zone reset_val) "
+            "- (now() at time zone 'UTC'))::int as offset from pg_catalog.pg_settings where name = 'TimeZone'");
         server_zone = row.zone;
         server_offset = row.offset;
         ds.rollback();
@@ -229,16 +234,69 @@ class SessionTimeZoneTest inherits Test {
         checkSession(ds, zone);
     }
 
-    private noOption() {
-        serverZone();
+    private programZone() {
+        # a Program zone whose offset differs from the session's start zone, so that a session that kept the start
+        # zone would show
+        string zone = differentZone(Regions);
+        TimeZone orig = TimeZone::get();
+        on_exit TimeZone::set(orig);
+        TimeZone::setRegion(zone);
+
         Datasource ds = plain(); on_exit ds.close();
-        hash<auto> row = ds.selectRow("select setting, reset_val from pg_catalog.pg_settings "
-            "where name = 'TimeZone'");
-        assertEq(server_zone, row.setting);
-        # the driver issued no SET: the session still has the zone it started with
-        assertEq(row.reset_val, row.setting);
-        assertEq(TimeZone::get().region(), ds.getOption("timezone"));
+        assertEq(zone, ds.selectRow("select pg_catalog.current_setting('TimeZone') as zone").zone);
+        assertEq(zone, ds.getOption("timezone"));
+        # a DATE keeps the calendar date of a value in the Program's zone
+        ds.exec("create temporary table program_zone_check (d date) on commit drop");
+        date midnight = date("2040-01-05T00:00:00");
+        ds.exec("insert into program_zone_check values (%v)", midnight);
+        assertEq("2040-01-05", ds.selectRow("select d::text as d from program_zone_check").d);
         ds.commit();
+        checkSession(ds, zone);
+    }
+
+    # returns the TimeZone setting of a session opened by a qore process with the given TZ environment variable
+    private string childSessionZone(string tz) {
+        string script = tmp_location() + DirSep + get_random_string() + ".q";
+        File f();
+        f.open2(script, O_CREAT | O_WRONLY | O_TRUNC);
+        f.write("%modern\n%requires pgsql\nDatasource ds(ENV.QORE_DB_CONNSTR_PGSQL);\n"
+            "print(ds.selectRow(\"select pg_catalog.current_setting('TimeZone') as zone\").zone);\n");
+        f.close();
+        on_exit unlink(script);
+        string cmd = sprintf("TZ='%s' QORE_MODULE_DIR='%s/../build:%s' qore '%s' 2>&1", tz, get_script_dir(),
+            ENV.QORE_MODULE_DIR ?? "", script);
+        return backquote(cmd);
+    }
+
+    private fileZone() {
+        plain();
+        # the system's local zone file, when it is a link into a zoneinfo directory
+        if (!is_link("/etc/localtime")) {
+            testSkip("/etc/localtime is not a link");
+        }
+        *string region = (realpath("/etc/localtime") =~ x/\/zoneinfo\/(.+)$/)[0];
+        if (!region) {
+            testSkip("/etc/localtime is not in a zoneinfo directory");
+        }
+        assertEq(region, childSessionZone(":/etc/localtime"));
+    }
+
+    private unnamedZone() {
+        serverZone();
+        # a zone file outside of any zoneinfo directory has no region name that the server knows
+        string dir = tmp_location() + DirSep + get_random_string();
+        mkdir(dir);
+        on_exit rmdir(dir);
+        string zone_file = dir + DirSep + "Zone";
+        File src();
+        src.open2("/usr/share/zoneinfo/" + differentZone(Regions));
+        File dst();
+        dst.open2(zone_file, O_CREAT | O_WRONLY | O_TRUNC);
+        dst.write(src.readBinary(-1));
+        dst.close();
+        on_exit unlink(zone_file);
+        # the session keeps the zone it started with
+        assertEq(server_zone, childSessionZone(":" + zone_file));
     }
 
     private invalidZones() {

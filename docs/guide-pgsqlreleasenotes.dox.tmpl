@@ -15,8 +15,16 @@
       zone the server used, so a connection whose option did not match the server's zone stored and returned
       plain \c timestamp values shifted by the difference.  Such connections now get consistent timestamp data,
       and server-side date/time functions (\c now()::timestamp, \c current_date, \c date_trunc(),
-      \c to_char(), and column defaults such as <tt>DEFAULT now()</tt>) now use the declared zone on them.
-      Connections without the option are unchanged
+      \c to_char(), and column defaults such as <tt>DEFAULT now()</tt>) now use the declared zone on them
+    - without the \c "timezone" option, the zone of the Program that opens the connection, which the driver
+      already used to write and read date/time values, is also set as the session's time zone (see
+      @ref pgsql_timezone); previously the session kept the server's time zone, so with a client in another zone
+      a date/time value bound to a \c DATE column was stored with the calendar date in the server's zone (ex: a
+      date in Europe/Prague read back one day earlier from a server in UTC), and plain \c timestamp values were
+      stored and read back shifted by the difference.  <b>Behaviour change:</b> when the client's time zone differs
+      from the server's default time zone, server-side date/time functions (ex: \c now()::timestamp,
+      \c current_date, \c to_char(), <tt>DEFAULT now()</tt>) now use the client's time zone; set the
+      \c "timezone" option to the server's zone to keep the previous behaviour for them
     - UTC offsets in the \c "timezone" option (ex: \c "+01:00") work; they are set on the server as offsets
       east of UTC, as in %Qore.  An invalid zone raises a \c DBI:PGSQL:TIMEZONE-ERROR exception and the
       connection is not opened

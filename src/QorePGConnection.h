@@ -485,6 +485,13 @@ public:
     */
     DLLLOCAL int getSql(PGconn* pc, std::string& sql, ExceptionSink* xsink) const;
 
+    //! Sets the specification from a client zone (the zone of the Program that opens the connection)
+    /** A zone loaded from a file (ex: \c TZ=":/etc/localtime") is named by its path below the zoneinfo directory
+
+        @return 0 for success, -1 if the zone has no region name that can be set on the server (no exception)
+    */
+    DLLLOCAL int setFromZone(const AbstractQoreZoneInfo* tz);
+
     //! Returns true if both specifications set the same session zone
     DLLLOCAL bool sameAs(const QorePGTimeZoneSpec& other) const {
         return is_offset == other.is_offset && offset_minutes == other.offset_minutes && region == other.region;
@@ -519,8 +526,11 @@ protected:
     // empty means unset (libpq default applies)
     std::string opt_application_name;
 
-    // true if the "timezone" option was given: the session's zone is then set to session_tz on every connection
+    // true if the session's zone is set to session_tz on every connection: the "timezone" option, or without it the
+    // zone of the Program that opened the connection, when that zone has a region name that the server knows
     bool session_tz_set = false;
+    // true if session_tz is the Program's zone (no "timezone" option): a server that does not know it keeps its own
+    bool session_tz_implicit = false;
     // the zone set on the session when session_tz_set is true
     QorePGTimeZoneSpec session_tz;
     // the TimeZone parameter value reported by the server after the zone was set

@@ -182,6 +182,12 @@ static PGconn* pgsql_connect_cancellable(const char* conninfo, int connect_timeo
 // the longest region name accepted; IANA names are far shorter
 #define QPG_MAX_TZ_REGION_LEN 255
 
+//! Returns true if the only exception in \a xsink is the server's refusal of a session time zone
+static bool qpg_is_timezone_error(ExceptionSink* xsink) {
+    QoreStringValueHelper err(xsink->getExceptionErr());
+    return !strcmp(err->c_str(), "DBI:PGSQL:TIMEZONE-ERROR");
+}
+
 static void qpg_tz_error(ExceptionSink* xsink, const char* value, const char* reason) {
     xsink->raiseException("DBI:PGSQL:TIMEZONE-ERROR", "invalid \"timezone\" option value '%s': %s; expecting a time "
         "zone region name (ex: \"Europe/Prague\") or a UTC offset in whole minutes (ex: \"+01:00\" or \"-05:30\")",
@@ -277,6 +283,36 @@ int QorePGTimeZoneSpec::parseRegion(const char* value, ExceptionSink* xsink) {
     }
     is_offset = false;
     region = value;
+    zone = tz;
+    return 0;
+}
+
+int QorePGTimeZoneSpec::setFromZone(const AbstractQoreZoneInfo* tz) {
+    const char* rn = tz_get_region_name(tz);
+    std::string region = rn && *rn ? rn : "UTC";
+    // a zone loaded from a file is named by its path: its region is the path below the zoneinfo directory
+    if (region[0] == '/') {
+#ifdef _WIN32
+        return -1;
+#else
+        char path[PATH_MAX];
+        if (!realpath(region.c_str(), path)) {
+            return -1;
+        }
+        const char* p = strstr(path, "/zoneinfo/");
+        if (!p) {
+            return -1;
+        }
+        region = p + strlen("/zoneinfo/");
+#endif
+    }
+    ExceptionSink xsink;
+    if (parseRegion(region.c_str(), &xsink)) {
+        xsink.clear();
+        return -1;
+    }
+    name = region;
+    // the driver converts date/time values in the Program's zone itself
     zone = tz;
     return 0;
 }
@@ -3371,6 +3407,12 @@ QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink
             }
         }
     }
+    // without the "timezone" option, the connection's zone is the zone of the calling Program, which is also set on
+    // the session, so that the server converts date/time values in the same zone as the driver
+    if (!session_tz_set && !session_tz.setFromZone(server_tz)) {
+        session_tz_set = true;
+        session_tz_implicit = true;
+    }
 
     // apply the connection options to the conninfo; enabling TCP keepalives with an aggressive idle
     // time lets PostgreSQL promptly detect and reap backends orphaned by an unclean client exit
@@ -3461,13 +3503,20 @@ QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink
 
     PQsetNoticeProcessor(pc, custom_notice_processor, this);
 
-    // set the declared zone on the session, so that the server converts date/time values in the same zone as
-    // the driver; the open fails if the server does not accept it
+    // set the connection's zone on the session, so that the server converts date/time values in the same zone as
+    // the driver; the open fails if the server does not accept the zone of the "timezone" option, while a session
+    // whose server does not know the Program's zone keeps the server's zone
     if (!*xsink && session_tz_set) {
         if (applySessionTimeZone(session_tz, xsink)) {
-            return;
+            if (!session_tz_implicit || !qpg_is_timezone_error(xsink)) {
+                return;
+            }
+            xsink->clear();
+            session_tz_set = false;
+            session_tz_implicit = false;
+        } else {
+            server_tz = session_tz.zone;
         }
-        server_tz = session_tz.zone;
     }
 
     // Discover extension types (pgvector, etc.) - non-fatal if it fails
@@ -3597,6 +3646,7 @@ int QorePGConnection::setTimeZoneOption(const char* value, ExceptionSink* xsink)
     }
     session_tz = spec;
     session_tz_set = true;
+    session_tz_implicit = false;
     server_tz = spec.zone;
     return 0;
 }
@@ -3613,7 +3663,15 @@ int QorePGConnection::restoreSession(ExceptionSink* xsink) {
     if (!session_tz_set) {
         return 0;
     }
-    return applySessionTimeZone(session_tz, xsink);
+    if (applySessionTimeZone(session_tz, xsink)) {
+        if (!session_tz_implicit || !qpg_is_timezone_error(xsink)) {
+            return -1;
+        }
+        // the server accepted the Program's zone when the connection was opened; a server that does not know it
+        // any more keeps its own zone
+        xsink->clear();
+    }
+    return 0;
 }
 
 int QorePGConnection::applySessionTimeZone(const QorePGTimeZoneSpec& spec, ExceptionSink* xsink) {

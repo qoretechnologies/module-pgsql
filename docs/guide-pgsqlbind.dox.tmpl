@@ -24,7 +24,12 @@
 
     @section pgsql_timezone Time Zone Support
 
-    The driver uses the current time zone settings of the calling Program object as the connection's time zone; this can be overridden/changed by setting the \c "timezone" driver option (see @ref pgsqloptionsguide).  When the \c "timezone" option is set, it is also set as the session's time zone on the server on every connection and reconnection, so that the server converts date/time values in the same zone as the driver.  When it is not set, the session keeps the server's time zone, which must then be the same as the client's for plain \c timestamp values to be stored and read back unchanged.
+    The driver uses the current time zone settings of the calling Program object as the connection's time zone; this can be overridden/changed by setting the \c "timezone" driver option (see @ref pgsqloptionsguide).  The connection's time zone is also set as the session's time zone on the server on every connection and reconnection, so that the server converts date/time values in the same zone as the driver, whatever the server's default time zone is:
+    - a date/time value bound to a \c DATE column keeps its calendar date in the connection's time zone; to keep the calendar date of a value in another zone, bind it with <tt>pgsql_bind(PG_TYPE_DATE, value)</tt> (see @ref pgsql_binding_by_type)
+    - plain \c timestamp values are stored and read back unchanged
+    - server-side date/time functions (ex: <tt>now()::timestamp</tt>, \c current_date, \c to_char(), and column defaults such as <tt>DEFAULT now()</tt>) use the connection's time zone, also when it differs from the server's default time zone
+
+    Without the \c "timezone" option, a session whose server does not know the Program's time zone, or whose Program's time zone has no region name (ex: a zone file outside of a \c zoneinfo directory), keeps the server's time zone; plain \c timestamp values are then only stored and read back unchanged if the server's time zone is the same as the client's.
 
     All date/time values bound by value are converted to the server's time zone before binding to ensure that date/time values are stored correctly in the server.
 
