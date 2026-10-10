@@ -332,16 +332,48 @@ QoreValue qore_pg_numeric::toOptimal() const {
     QoreString str;
     toStr(str);
 
-    //printd(5, "qore_pg_numeric::toOptimal() processing %s ndigits: %d weight: %d sign: %d cmp: %d\n", str.c_str(), ndigits, weight, sign, strcmp(str.c_str(), "-9223372036854775808"));
-
-    // return an integer if the number can be converted to a 64-bit integer
-    if ((ndigits <= (weight + 1)) && (ndigits < 4
-                    || (ndigits == 5 &&
-                        ((!sign && strcmp(str.c_str(), "9223372036854775807") <= 0)
-                        ||(sign && strcmp(str.c_str(), "-9223372036854775808") <= 0)))))
+    // an integer is returned only if a 64-bit integer can hold the value exactly; any other value is a number, so
+    // that a value is never clamped to the integer range
+    if (isInt64(str)) {
         return str.toBigInt();
+    }
 
     return new QoreNumberNode(str.c_str());
+}
+
+bool qore_pg_numeric::isInt64(const QoreString& str) const {
+    unsigned short s = static_cast<unsigned short>(sign);
+    // NaN and the infinities are not integers
+    if (s != PGSQL_NUMERIC_POS && s != PGSQL_NUMERIC_NEG) {
+        return false;
+    }
+    // the value is sum(digits[i] * 10000^(weight - i)): an integer has no nonzero digit group after the decimal
+    // point (the server does not send trailing zero groups, but they would not make a fraction)
+    for (int d = weight + 1 < 0 ? 0 : weight + 1; d < ndigits; ++d) {
+        if (digits[d]) {
+            return false;
+        }
+    }
+    // zero (no nonzero digit group), or a value below 10000^4 = 10^16: always fits
+    if (weight < 4) {
+        return true;
+    }
+    // 10000^5 = 10^20 or more: never fits
+    if (weight > 4) {
+        return false;
+    }
+    // 10^16 <= |value| < 10^20: compare the integer digits with the bound for the sign, by length and then
+    // lexically (neither has leading zeros)
+    static const char max_pos[] = "9223372036854775807";
+    static const char max_neg[] = "9223372036854775808";
+    bool neg = s == PGSQL_NUMERIC_NEG;
+    const char* p = str.c_str() + (neg ? 1 : 0);
+    size_t len = strcspn(p, ".");
+    const size_t bound_len = sizeof(max_pos) - 1;
+    if (len != bound_len) {
+        return len < bound_len;
+    }
+    return strncmp(p, neg ? max_neg : max_pos, bound_len) <= 0;
 }
 
 QoreStringNode* qore_pg_numeric::toString() const {
@@ -358,36 +390,50 @@ QoreNumberNode* qore_pg_numeric::toNumber() const {
 }
 
 void qore_pg_numeric::toStr(QoreString& str) const {
-    if (!ndigits) {
+    // the special values have no digits
+    switch (static_cast<unsigned short>(sign)) {
+        case PGSQL_NUMERIC_NAN:
+            str.concat("NaN");
+            return;
+        case PGSQL_NUMERIC_PINF:
+            str.concat("Infinity");
+            return;
+        case PGSQL_NUMERIC_NINF:
+            str.concat("-Infinity");
+            return;
+        case PGSQL_NUMERIC_NEG:
+            str.concat('-');
+            break;
+        default:
+            break;
+    }
+
+    //printd(5, "qore_pg_numeric::toStr() ndigits: %d weight: %d dscale: %d\n", ndigits, weight, dscale);
+
+    // the digits before the decimal point; the value is sum(digits[i] * 10000^(weight - i)), so digit group i is
+    // the (weight - i)th power of 10000, and groups the server did not send (trailing zero groups) are 0
+    int d;
+    if (weight < 0) {
+        d = weight + 1;
         str.concat('0');
-        return;
+    } else {
+        for (d = 0; d <= weight; ++d) {
+            unsigned dig = d < ndigits ? ntohs(digits[d]) : 0;
+            // the first group has no leading zeros
+            str.sprintf(d ? "%04u" : "%u", dig);
+        }
     }
 
-    if (sign)
-        str.concat('-');
-
-    //printd(5, "qore_pg_numeric::toStr() ndigits: %d dscale: %d\n", ndigits, dscale);
-
-    int i;
-    for (i = 0; i < ndigits; ++i) {
-        if (i == weight + 1)
-            str.concat('.');
-        if (i || weight < 0)
-            str.sprintf("%04d", ntohs(digits[i]));
-        else
-            str.sprintf("%d", ntohs(digits[i]));
-        //printd(5, "qore_pg_numeric::toStr() digit %d: %d\n", i, ntohs(digits[i]));
-    }
-
-    //printd(5, "qore_pg_numeric::toStr() i: %d weight: %d str: %s\n", i, weight, str.c_str());
-
-    // now add significant zeros for remaining decimal places
-    if (weight >= i)
-        str.addch('0', (weight - i + 1) * 4);
-    else if (weight < -1) {
-        for (int i = weight; i < -1; ++i)
-            str.insert("0000", 0);
-        str.prepend(".");
+    // the display scale gives the number of digits after the decimal point: whole groups are written, then the
+    // string is cut to the display scale
+    if (dscale > 0) {
+        str.concat('.');
+        size_t end = str.size() + dscale;
+        for (int i = 0; i < dscale; ++d, i += 4) {
+            unsigned dig = (d >= 0 && d < ndigits) ? ntohs(digits[d]) : 0;
+            str.sprintf("%04u", dig);
+        }
+        str.terminate(end);
     }
 
     //printd(5, "qore_pg_numeric::toStr() str: '%s'\n", str.c_str());
@@ -398,6 +444,16 @@ size_t qore_pg_numeric::rawSize() const {
 }
 
 qore_pg_numeric_out::qore_pg_numeric_out(const QoreNumberNode* n) {
+    // NaN and the infinities have no digits; the server's binary numeric format has a sign for each (servers before
+    // PostgreSQL 14 reject the infinities)
+    if (n->nan() || n->inf()) {
+        unsigned short special = n->nan() ? PGSQL_NUMERIC_NAN
+            : (n->sign() < 0 ? PGSQL_NUMERIC_NINF : PGSQL_NUMERIC_PINF);
+        sign = static_cast<short>(special);
+        convertToNet();
+        return;
+    }
+
     QoreString str;
     n->getStringRepresentation(str);
 
@@ -407,7 +463,7 @@ qore_pg_numeric_out::qore_pg_numeric_out(const QoreNumberNode* n) {
     int nsign = n->sign();
     if (nsign < 0) {
         // this is what the server sends for negative numbers
-        sign = 0x4000;
+        sign = PGSQL_NUMERIC_NEG;
         // remove the minus sign from the string
         str.trim_leading('-');
     }

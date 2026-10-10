@@ -297,14 +297,34 @@ struct qore_pg_numeric_base {
     }
 };
 
+//! The sign of a positive value in the server's binary \c numeric representation
+#define PGSQL_NUMERIC_POS 0x0000
+//! The sign of a negative value in the server's binary \c numeric representation
+#define PGSQL_NUMERIC_NEG 0x4000
+//! The sign of NaN in the server's binary \c numeric representation
+#define PGSQL_NUMERIC_NAN 0xC000
+//! The sign of positive infinity in the server's binary \c numeric representation (PostgreSQL 14+)
+#define PGSQL_NUMERIC_PINF 0xD000
+//! The sign of negative infinity in the server's binary \c numeric representation (PostgreSQL 14+)
+#define PGSQL_NUMERIC_NINF 0xF000
+
 struct qore_pg_numeric : public qore_pg_numeric_base {
     unsigned short digits[1];
 
     DLLLOCAL void convertToHost();
+    //! Returns an integer if the value is an integer that a 64-bit integer can hold, otherwise a number
     DLLLOCAL QoreValue toOptimal() const;
     DLLLOCAL QoreStringNode* toString() const;
     DLLLOCAL QoreNumberNode* toNumber() const;
+    //! Appends the value's text as the server writes it: sign, integer digits, and \c dscale fractional digits
+    /** NaN and the infinities are written \c "NaN", \c "Infinity" and \c "-Infinity"
+    */
     DLLLOCAL void toStr(QoreString& str) const;
+
+    //! Returns true if the value is an integer that a 64-bit integer can hold
+    /** @param str the value's text from toStr()
+    */
+    DLLLOCAL bool isInt64(const QoreString& str) const;
 
     // must be called on raw data before convertToHost() is called
     DLLLOCAL size_t rawSize() const;

@@ -32,6 +32,22 @@
       calendar date of the value in its own time zone (see @ref pgsql_binding_by_type)
     - a string bound with an explicit type OID (@ref Qore::Pgsql::pgsql_bind "pgsql_bind()") is converted to the
       connection's character encoding, as with a type name; previously it was sent unconverted
+    - fixed reading \c NUMERIC values with \c "optimal-numbers" (the default): a value is returned as an integer only
+      if it is an integer that a 64-bit integer can hold, and otherwise as a number; previously the decision was made
+      on the count of the server's 4-digit groups instead of the value's magnitude, so integers of 10^19 or more
+      with few nonzero digits (ex: 10000000000000000000) were silently returned as 9223372036854775807 (or
+      -9223372036854775808 when negative), and many integers that fit (ex: 88109472537521, 99999999999999999) were
+      returned as numbers
+    - fixed reading \c NUMERIC \c NaN, \c Infinity and \c -Infinity values, which were returned as 0 with every number
+      option; they are now NaN and infinite numbers (or the strings \c "NaN", \c "Infinity" and \c "-Infinity" with
+      \c "string-numbers")
+    - fixed reading negative \c NUMERIC values between -0.0001 and 0 with more than four zeros after the decimal
+      point (ex: -0.00000001), which were returned as 0 (or an invalid string with \c "string-numbers")
+    - \c "string-numbers" returns the server's text for a \c NUMERIC value (ex: \c "0.0001", \c "1.50" for a value
+      with two decimal places); previously the leading zero and the value's scale were not kept (ex: \c ".0001",
+      \c "1.5000", or \c "1" for \c 1.000)
+    - fixed binding NaN and infinite number values, which were stored as 0; they are bound as \c NaN, \c Infinity and
+      \c -Infinity (servers before PostgreSQL 14 reject the infinities with an error)
 
     - public API documentation includes generated QPP declarations and binding links
     - CMake uninstall honors staging paths and preserves unrelated files and directories

@@ -254,6 +254,7 @@ class PgsqlTest inherits QUnit::Test {
         addTestCase("pgvector type test", \pgvectorTest());
         addTestCase("tcp-user-timeout option test", \tcpUserTimeoutTest());
         addTestCase("typed date/time bind test", \typedDateTimeBindTest());
+        addTestCase("numeric conversion test", \numericConversionTest());
 
         set_return_value(main());
     }
@@ -590,6 +591,93 @@ class PgsqlTest inherits QUnit::Test {
         string latin1 = convert_encoding("Grüße", "ISO-8859-1");
         assertEq("Grüße", db.selectRow("select %v::text as s", pgsql_bind(PG_TYPE_TEXT, latin1)).s);
         assertEq("Grüße", db.selectRow("select %v::text as s", {"^pgtype^": "text", "^value^": latin1}).s);
+    }
+
+    private numericConversionTest() {
+        # with optimal-numbers, an integer is returned only when a 64-bit integer holds the value exactly
+        {
+            Datasource db(connstr);
+            db.setOption("optimal-numbers", True);
+            on_exit db.rollback();
+
+            # integers of every digit-group count, both int64 bounds, zero, and values with trailing zero groups
+            list<auto> ints = (
+                ("0", 0), ("0.000", 0), ("1.000", 1), ("-1", -1), ("9999", 9999), ("10000", 10000),
+                ("88109472537521", 88109472537521), ("12345678901234", 12345678901234),
+                ("1234567890123456", 1234567890123456), ("9999999999999999", 9999999999999999),
+                ("10000000000000000", 10000000000000000), ("99999999999999999", 99999999999999999),
+                ("1000000000000000000", 1000000000000000000), ("-1000000000000000000", -1000000000000000000),
+                ("9223372036854775807", 9223372036854775807), ("9223372036854775807.000", 9223372036854775807),
+                ("-9223372036854775807", -9223372036854775807), ("-9223372036854775808", -9223372036854775807 - 1),
+            );
+            foreach list<auto> c in (ints) {
+                auto v = db.selectRow(sprintf("select %s::numeric as v", c[0])).v;
+                assertEq(NT_INT, v.typeCode(), c[0]);
+                assertEq(c[1], v, c[0]);
+            }
+
+            # values beyond the int64 range and fractional values are numbers, never clamped
+            list<string> nums = (
+                "9223372036854775808", "-9223372036854775809", "9999999999999999999", "-9999999999999999999",
+                "10000000000000000000", "-10000000000000000000", "12345678901234567890", "100000000000000000000",
+                "1000000000000000000000000", "-1000000000000000000000000", "0.5", "-0.5", "1.5", "0.0001",
+                "-0.00000001", "100000000.0001", "9223372036854775807.5",
+            );
+            foreach string str in (nums) {
+                auto v = db.selectRow(sprintf("select %s::numeric as v", str)).v;
+                assertEq(NT_NUMBER, v.typeCode(), str);
+                assertEq(number(str), v, str);
+            }
+        }
+
+        # every mode: the value is the server's value; string mode returns the server's text
+        bool have_inf;
+        {
+            Datasource db(connstr);
+            have_inf = db.getServerVersion() >= 140000;
+        }
+        list<string> vals = (
+            "0", "0.000", "-0.00000001", "0.00000001", "-0.0001", "1.50", "-1.5", "123.4500", "-12345.678901234567890",
+            "100000000.0001", "9223372036854775808", "-10000000000000000000", "1000000000000000000000000", "'NaN'",
+        );
+        if (have_inf) {
+            vals += ("'Infinity'", "'-Infinity'");
+        }
+        foreach string mode in (("optimal-numbers", "numeric-numbers", "string-numbers")) {
+            Datasource db(connstr);
+            db.setOption(mode, True);
+            on_exit db.rollback();
+            foreach string str in (vals) {
+                hash<auto> row = db.selectRow(sprintf("select %s::numeric as v, (%s::numeric)::text as t", str, str));
+                string label = mode + " " + str;
+                if (mode == "string-numbers") {
+                    assertEq(row.t, row.v, label);
+                    continue;
+                }
+                if (mode == "numeric-numbers") {
+                    assertEq(NT_NUMBER, row.v.typeCode(), label);
+                }
+                # with optimal-numbers, integral values are integers (checked above); the value is compared as a number
+                number expected = number(row.t);
+                if (expected.nanp()) {
+                    assertTrue(number(row.v).nanp(), label);
+                } else {
+                    assertEq(expected, number(row.v), label);
+                }
+            }
+        }
+
+        # NaN and the infinities are bound as such
+        {
+            Datasource db(connstr);
+            on_exit db.rollback();
+            assertEq("NaN", db.selectRow("select %v::text as t", @NaN@n).t);
+            if (have_inf) {
+                assertEq("Infinity", db.selectRow("select %v::text as t", @Inf@n).t);
+                assertEq("-Infinity", db.selectRow("select %v::text as t", -@Inf@n).t);
+            }
+            assertEq("-0.00000001", db.selectRow("select %v::text as t", -0.00000001n).t);
+        }
     }
 
     private tcpUserTimeoutTest() {
