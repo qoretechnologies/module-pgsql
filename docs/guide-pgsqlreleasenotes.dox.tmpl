@@ -25,6 +25,16 @@
       from the server's default time zone, server-side date/time functions (ex: \c now()::timestamp,
       \c current_date, \c to_char(), <tt>DEFAULT now()</tt>) now use the client's time zone; set the
       \c "timezone" option to the server's zone to keep the previous behaviour for them
+    - <b>Upgrade note:</b> where the client's time zone differs from the server's default time zone, plain
+      \c timestamp and \c date values written through connections without the \c "timezone" option differ from
+      the values written before the upgrade, because the session now uses the client's zone instead of the server's:
+      this applies to values computed by the server in the session's zone (ex: <tt>now()::timestamp</tt>,
+      \c current_date, <tt>DEFAULT now()</tt>, <tt>date_trunc('month', now())::timestamp</tt>, or a
+      \c timestamptz cast to \c timestamp in SQL) and to bound date/time values stored in such columns.  Rows
+      written before and after the upgrade can therefore disagree (ex: a month start stored as \c "02:00" in a
+      server zone ahead of UTC, now as \c "00:00"); an application that stores such values and compares them, or
+      uses them as keys, should write them independently of the session zone (ex: as \c timestamptz, or in an
+      explicitly given zone), or set the \c "timezone" option to the server's zone to keep the previous values
     - UTC offsets in the \c "timezone" option (ex: \c "+01:00") work; they are set on the server as offsets
       east of UTC, as in %Qore.  An invalid zone raises a \c DBI:PGSQL:TIMEZONE-ERROR exception and the
       connection is not opened
