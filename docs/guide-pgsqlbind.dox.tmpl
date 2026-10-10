@@ -44,6 +44,19 @@
     |\c date|\c INTERVAL, \c TIMESTAMP|Relative date/time values are bound as interval data, absolute date/time values are bound as timestamp data
     |\c binary|\c BYTEA|Qore binary data is bound directly as bytea data.
 
+    @section pgsql_binding_by_type Binding With an Explicit Type
+
+    A value bound with @ref Qore::Pgsql::pgsql_bind "pgsql_bind()", or with a hash giving the type name in its
+    \c "^pgtype^" key and the value in its \c "^value^" key, is sent as text to be converted by the server to that
+    type; strings are converted to the connection's character encoding.  A date/time value is sent in the text form
+    of the type, as in typed arrays:
+    - \c DATE: the calendar date of the value in its own time zone, ex: <tt>pgsql_bind(PG_TYPE_DATE,
+      2040-01-05T00:00:00+14:00)</tt> binds <tt>2040-01-05</tt>, whatever the time zone of the session
+    - \c TIME and \c TIMESTAMP: the wall-clock time of the value in its own time zone
+    - \c TIMETZ and \c TIMESTAMPTZ: the value with its UTC offset
+    - \c INTERVAL: a relative date/time value as an ISO 8601 duration
+    - any other type: the value in ISO 8601 format with its UTC offset
+
     @section pgsql_to_qore PostgreSQL to Qore Type Mappings
     |!PostgreSQL Type|!Qore Type|!Notes
     |\c BOOLEAN|\c bool|direct conversion

@@ -25,6 +25,13 @@
       reconnect when the datasource's encoding differed from the database's
     - typed timestamp and time binds with precision retain their WITH TIME ZONE qualifier,
       preserving offsets in both scalar and array values
+    - a date/time value bound with an explicit type (@ref Qore::Pgsql::pgsql_bind "pgsql_bind()" or a
+      \c "^pgtype^" hash) is sent in the text form of that type, as in typed arrays; previously it was sent in
+      %Qore's default string format, which the server rejected for \c DATE, \c TIME, \c TIMETZ, \c TIMESTAMP and
+      \c TIMESTAMPTZ, and which bound a relative date/time value as a wrong \c INTERVAL.  A \c DATE receives the
+      calendar date of the value in its own time zone (see @ref pgsql_binding_by_type)
+    - a string bound with an explicit type OID (@ref Qore::Pgsql::pgsql_bind "pgsql_bind()") is converted to the
+      connection's character encoding, as with a type name; previously it was sent unconverted
 
     - public API documentation includes generated QPP declarations and binding links
     - CMake uninstall honors staging paths and preserves unrelated files and directories

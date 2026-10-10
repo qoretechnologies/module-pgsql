@@ -2128,6 +2128,39 @@ static const char* get_pg_date_format(Oid base_oid) {
     }
 }
 
+//! Returns the text of a scalar value bound with an explicit PostgreSQL type, in the connection's encoding
+/** A date/time value is formatted for the type like an element of a typed array (see get_pg_date_format()), as the
+    server does not accept the default string conversion of a date/time value; a \c DATE therefore receives the
+    calendar date of the value in its own time zone
+
+    @param val the value to bind; must not be NULL or NOTHING
+    @param type the type OID the value is bound with
+    @param enc the connection's character encoding
+    @param len the length of the text in bytes, set on success
+    @param xsink exception sink for error reporting
+
+    @return the text in a buffer allocated with malloc(), or nullptr when the conversion failed and an exception is
+    present in \a xsink
+*/
+static char* qpg_typed_scalar_text(QoreValue val, Oid type, const QoreEncoding* enc, int& len,
+        ExceptionSink* xsink) {
+    if (val.getType() == NT_DATE) {
+        QoreString datestr;
+        val.get<const DateTimeNode>()->format(datestr, get_pg_date_format(type));
+        // a formatted date/time value is ASCII text, which every server encoding accepts as is
+        len = static_cast<int>(datestr.strlen());
+        return qpg_copy_string_buffer(&datestr);
+    }
+
+    QoreStringValueHelper str(val);
+    TempEncodingHelper tmp(*str, enc, xsink);
+    if (!tmp) {
+        return nullptr;
+    }
+    len = static_cast<int>(tmp->strlen());
+    return qpg_copy_string_buffer(*tmp);
+}
+
 //! Builds a PostgreSQL text-format array literal from a Qore list
 /** Converts a Qore list to the PostgreSQL text array literal format: {val1,val2,...}
     NULL/NOTHING values become unquoted NULL; all other values are quoted with
@@ -2550,14 +2583,14 @@ int QorePgsqlStatement::add(QoreValue v_arg, ExceptionSink *xsink) {
                     paramValues[nParams] = pb->str;
                 } else {
                     paramTypes[nParams] = base_oid;
-                    QoreStringValueHelper str(val);
-                    TempEncodingHelper tmp(*str, enc, xsink);
-                    if (!tmp) {
+                    int len;
+                    pb->str = qpg_typed_scalar_text(val, base_oid, enc, len, xsink);
+                    if (!pb->str) {
+                        paramValues[nParams] = 0;
                         ++nParams;
                         return -1;
                     }
-                    paramLengths[nParams] = tmp->strlen();
-                    pb->str = qpg_copy_string_buffer(*tmp);
+                    paramLengths[nParams] = len;
                     paramValues[nParams] = pb->str;
                 }
                 paramFormats[nParams] = 0;  // text format
@@ -2583,9 +2616,14 @@ int QorePgsqlStatement::add(QoreValue v_arg, ExceptionSink *xsink) {
         } else {
             paramTypes[nParams] = type;
 
-            QoreStringValueHelper str(t);
-            paramLengths[nParams] = str->strlen();
-            pb->str = qpg_copy_string_buffer(*str);
+            int len;
+            pb->str = qpg_typed_scalar_text(t, type, enc, len, xsink);
+            if (!pb->str) {
+                paramValues[nParams] = 0;
+                ++nParams;
+                return -1;
+            }
+            paramLengths[nParams] = len;
             paramValues[nParams] = pb->str;
         }
         paramFormats[nParams] = 0;

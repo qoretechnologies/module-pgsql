@@ -253,6 +253,7 @@ class PgsqlTest inherits QUnit::Test {
         addTestCase("COPY protocol test", \copyProtocolTest());
         addTestCase("pgvector type test", \pgvectorTest());
         addTestCase("tcp-user-timeout option test", \tcpUserTimeoutTest());
+        addTestCase("typed date/time bind test", \typedDateTimeBindTest());
 
         set_return_value(main());
     }
@@ -545,6 +546,50 @@ class PgsqlTest inherits QUnit::Test {
             assertEq("42P01", arg.alterr);
             assertEq(True, arg.alterr_diag =~ /dalhlhwqsadcnfhe/);
         }
+    }
+
+    private typedDateTimeBindTest() {
+        Datasource db(connstr);
+        on_exit db.rollback();
+
+        db.exec("create temporary table typed_dt_test (id int, d date, ts timestamp, tstz timestamptz, t time, "
+            "ttz timetz, iv interval, txt text) on commit drop");
+
+        # a date bound with an explicit type is sent in the text form of that type; a DATE keeps the calendar date of
+        # the value in its own time zone, whatever the time zone of the session or of the client
+        date east = 2040-01-05T00:00:00+14:00;
+        date west = 2040-01-05T23:30:00-08:00;
+        date ts = 2040-01-05T10:11:12.345678-08:00;
+        date iv = 6M + 3D + 2h + 45m + 15s + 5us;
+        list<auto> rows = (
+            # the type given as an OID
+            (1, pgsql_bind(PG_TYPE_DATE, east), pgsql_bind(PG_TYPE_TIMESTAMP, ts),
+                pgsql_bind(PG_TYPE_TIMESTAMPTZ, ts), pgsql_bind(PG_TYPE_TIME, ts), pgsql_bind(PG_TYPE_TIMETZ, ts),
+                pgsql_bind(PG_TYPE_INTERVAL, iv), pgsql_bind(PG_TYPE_TEXT, ts)),
+            # the type given by name
+            (2, {"^pgtype^": "date", "^value^": west}, {"^pgtype^": "timestamp", "^value^": ts},
+                {"^pgtype^": "timestamptz", "^value^": ts}, {"^pgtype^": "time", "^value^": ts},
+                {"^pgtype^": "timetz", "^value^": ts}, {"^pgtype^": "interval", "^value^": iv},
+                {"^pgtype^": "text", "^value^": ts}),
+        );
+        map db.vexec("insert into typed_dt_test values (%v, %v, %v, %v, %v, %v, %v, %v)", $1), rows;
+
+        # read back as text so that no time zone conversion applies to the result
+        hash<auto> q = db.select("select d::text as d, ts::text as ts, t::text as t, ttz::text as ttz, iv::text as iv, "
+            "txt, tstz from typed_dt_test order by id");
+        assertEq(("2040-01-05", "2040-01-05"), q.d);
+        assertEq(("2040-01-05 10:11:12.345678", "2040-01-05 10:11:12.345678"), q.ts);
+        assertEq(("10:11:12.345678", "10:11:12.345678"), q.t);
+        assertEq(("10:11:12.345678-08", "10:11:12.345678-08"), q.ttz);
+        assertEq(("6 mons 3 days 02:45:15.000005", "6 mons 3 days 02:45:15.000005"), q.iv);
+        assertEq(("2040-01-05T10:11:12.345678-08:00", "2040-01-05T10:11:12.345678-08:00"), q.txt);
+        # the same instant
+        assertEq((ts, ts), q.tstz);
+
+        # a string bound with an explicit type OID is converted to the connection's character encoding
+        string latin1 = convert_encoding("Grüße", "ISO-8859-1");
+        assertEq("Grüße", db.selectRow("select %v::text as s", pgsql_bind(PG_TYPE_TEXT, latin1)).s);
+        assertEq("Grüße", db.selectRow("select %v::text as s", {"^pgtype^": "text", "^value^": latin1}).s);
     }
 
     private tcpUserTimeoutTest() {

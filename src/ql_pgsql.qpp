@@ -410,6 +410,16 @@ namespace Qore::Pgsql;
 //! Creates a hash data structure understood by the pgsql DBI driver when binding values in SQL queries that allows programmers to directly specify the PostgreSQL data type for the bind
 /** Use the @ref pgsql_bind_constants to specify the PostgreSQL data type for the bind. If the value to bind is \c NOTHING or \c NULL, a \c NULL will be bound as the value, regardless of the PostgreSQL type code provided as the first argument.
 
+    The value is sent as text in the connection's character encoding; a date/time value is sent in the text form of
+    the type, so that a \c DATE receives the calendar date of the value in its own time zone (see
+    @ref pgsql_binding_by_type)
+
+    @par Example:
+    @code{.py}
+# binds 2040-01-05, whatever the time zone of the session
+db.exec("insert into t (d) values (%v)", pgsql_bind(PG_TYPE_DATE, 2040-01-05T00:00:00+14:00));
+    @endcode
+
     @param type the @ref pgsql_bind_constants "type code" for the PostgreSQL type to bind
     @param value the value to bind
 
