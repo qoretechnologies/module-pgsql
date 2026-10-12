@@ -1529,6 +1529,12 @@ QoreListNode* QorePgsqlStatement::getArray(int type, qore_pg_data_func_t func, c
     //  ndim, current, dim[current]);
     QoreListNode* l = new QoreListNode(autoTypeInfo);
 
+    // PostgreSQL encodes an empty array with zero dimensions. There is no
+    // dimension entry to inspect or recurse into in this case.
+    if (!ndim) {
+        return l;
+    }
+
     if (current != (ndim - 1)) {
         for (int i = 0; i < dim[current]; ++i)
             l->push(getArray(type, func, array_data, current + 1, ndim, dim), nullptr);

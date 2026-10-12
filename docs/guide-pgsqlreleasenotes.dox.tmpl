@@ -5,6 +5,8 @@
     @tableofcontents
 
     @section pgsql35 pgsql Driver Version 3.5
+    - empty PostgreSQL arrays are returned as empty lists reliably; reading an empty array
+      could previously cause excessive memory use or terminate the process
     - a connection attempt ends as soon as its thread is cancelled or its %Qore \c Program is interrupted
       (\c THREAD-CANCELLED or \c PROGRAM-INTERRUPTED), including while the server has accepted the connection but
       does not answer; previously it could only end when the server answered or the \c "connect-timeout" expired,

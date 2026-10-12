@@ -242,6 +242,7 @@ class PgsqlTest inherits QUnit::Test {
         addTestCase("geometric types test", \geometricTypesTest());
         addTestCase("network types test", \networkTypesTest());
         addTestCase("array binding test", \arrayBindingTest());
+        addTestCase("empty arrays preserve type and null distinctions", \emptyArrayTest());
         addTestCase("indirect references test", \indirectReferencesTest());
         addTestCase("prepared statement test", \preparedStatementTest());
         addTestCase("corner cases test", \cornerCasesTest());
@@ -854,6 +855,23 @@ class PgsqlTest inherits QUnit::Test {
         list<auto> opaque = ();
         opaque[0] @= arr;
         assertEq(arr, bind_and_read(opaque), "an opaque reference argument binds as its target");
+    }
+
+    private emptyArrayTest() {
+        Datasource db(connstr);
+        on_exit db.rollback();
+        foreach string type in (("integer", "text", "name", "boolean", "numeric", "timestamp")) {
+            # Empty binary arrays have zero dimensions, unlike an array containing NULL.
+            # Repeat through one statement so stale stack dimension data cannot affect decoding.
+            for (int i = 0; i < 20; ++i) {
+                hash<auto> row = db.selectRow(sprintf("select array[]::%s[] empty_value, "
+                    "null::%s[] null_value, array[null]::%s[] null_element", type, type, type));
+                assertEq((), row.empty_value);
+                assertEq(NULL, row.null_value);
+                assertEq((NULL,), row.null_element);
+            }
+        }
+        assertEq(((1, 2), (3, 4)), db.selectRow("select array[[1,2],[3,4]] value").value);
     }
 
     private arrayBindingTest() {
