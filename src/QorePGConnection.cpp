@@ -3903,7 +3903,8 @@ static int appendCopyBinaryHex(QoreString& buf, const BinaryNode* b, ExceptionSi
 //! appends one Qore value in PostgreSQL COPY text format
 /** @return 0 for success, -1 when conversion failed and an exception is present in \a xsink
 */
-static int appendCopyValue(QoreString& buf, QoreValue value, const QoreEncoding* enc, ExceptionSink* xsink) {
+static int appendCopyValue(QoreString& buf, QoreValue value, const QoreEncoding* enc,
+        const AbstractQoreZoneInfo* tz, ExceptionSink* xsink) {
     if (value.isNullOrNothing()) {
         buf.concat("\\N");
         return 0;
@@ -3945,10 +3946,14 @@ static int appendCopyValue(QoreString& buf, QoreValue value, const QoreEncoding*
             const DateTimeNode* d = value.get<const DateTimeNode>();
             QoreString tmp;
             if (d->isRelative()) {
-                d->getStringRepresentation(tmp);
-            } else {
-                // Qore's "IF" ISO format is accepted by PostgreSQL COPY
+                // Use PostgreSQL-readable ISO duration syntax, not Qore's display representation.
                 d->format(tmp, "IF");
+            } else {
+                // COPY into a plain timestamp ignores the ISO offset. Render in the datasource's
+                // zone, as for untyped bound dates, so COPY stores the same local wall time.
+                DateTime local(*d);
+                local.setZone(tz);
+                local.format(tmp, "IF");
             }
             buf.concat(tmp.c_str());
             break;
@@ -4269,7 +4274,7 @@ int QorePGConnection::bulkLoadRows(const QoreHashNode* rows, ExceptionSink* xsin
             QoreValue value = column_is_list[column]
                 ? column_lists[column]->retrieveEntry(i)
                 : column_scalars[column];
-            if (appendCopyValue(row, value, enc, xsink)) {
+            if (appendCopyValue(row, value, enc, getTZ(), xsink)) {
                 return -1;
             }
         }
@@ -4482,7 +4487,7 @@ QoreValue QorePGConnection::copyFromStdin(const QoreString* qstr, const QoreList
         QorePGCancelHelper cancel_helper(pc);
         for (int i = 0; i < num_rows; ++i) {
             // check for interrupt periodically
-            if ((i % 1000) == 0 && qore_check_cancel(xsink)) {
+            if ((i % 100) == 0 && qore_check_cancel(xsink)) {
                 error = true;
                 break;
             }
@@ -4490,6 +4495,10 @@ QoreValue QorePGConnection::copyFromStdin(const QoreString* qstr, const QoreList
             row_buf.clear();
 
             for (int j = 0; j < num_cols; ++j) {
+                if (j && !(j % 100) && qore_check_cancel(xsink)) {
+                    error = true;
+                    break;
+                }
                 if (j > 0) {
                     row_buf.concat('\t');
                 }
@@ -4501,7 +4510,7 @@ QoreValue QorePGConnection::copyFromStdin(const QoreString* qstr, const QoreList
                     cell = col_scalars[j];
                 }
 
-                if (appendCopyValue(row_buf, cell, enc, xsink)) {
+                if (appendCopyValue(row_buf, cell, enc, getTZ(), xsink)) {
                     error = true;
                     break;
                 }

@@ -35,6 +35,7 @@ class SessionTimeZoneTest inherits Test {
         addTestCase("a zone loaded from a file is set by its region name", \fileZone());
         addTestCase("a zone without a region name keeps the session's zone", \unnamedZone());
         addTestCase("invalid zones are rejected with a clear error", \invalidZones());
+        addTestCase("COPY dates agree with bound inserts in the datasource zone", \copyDates());
         set_return_value(main());
     }
 
@@ -297,6 +298,41 @@ class SessionTimeZoneTest inherits Test {
         on_exit unlink(zone_file);
         # the session keeps the zone it started with
         assertEq(server_zone, childSessionZone(":" + zone_file));
+    }
+
+    private copyDates() {
+        list<*date> stamps = (date("2026-01-01T00:00:00Z"), date("2026-07-01T00:00:00Z"),
+            date("2026-03-29T01:30:00.123456Z"), date("2026-10-25T01:30:00.654321Z"),
+            date("2026-07-01T00:00:00+05:45"), NOTHING);
+        list<*date> durations = (2D + 3h + 4m, 6M + 3D + 5us, -2D - 3h - 4m, 0s, 1s + 123456us, NOTHING);
+        foreach string zone in (("UTC", "Europe/Prague", "Asia/Kathmandu", "-03:30")) {
+            Datasource ds = withZone(zone); on_exit ds.close();
+            ds.exec("create temporary table copy_zone_check (id int, ts timestamp(6), tz timestamptz(6), "
+                "d date, duration interval) on commit drop");
+            hash<auto> data = {"id": (), "ts": stamps, "tz": stamps, "d": stamps, "duration": durations};
+            foreach *date stamp in (stamps) {
+                push data.id, $#;
+                ds.exec("insert into copy_zone_check values (%v, %v, %v, %v, %v)", $#, stamp, stamp, stamp,
+                    durations[$#]);
+            }
+            # Compare stored wall times as well as instants; a repeated DST hour is deliberately included.
+            string query = "select id, ts::text as ts, tz, d::text as d, duration from copy_zone_check order by id";
+            hash<auto> expected = ds.select(query);
+            foreach string mode in (("copy", "native")) {
+                ds.exec("delete from copy_zone_check");
+                if (mode == "copy") {
+                    assertEq(stamps.size(), ds.exec("COPY copy_zone_check (id, ts, tz, d, duration) FROM STDIN", data));
+                } else {
+                    assertTrue(ds.bulkLoadBegin("copy_zone_check", ("id", "ts", "tz", "d", "duration"), NOTHING));
+                    ds.bulkLoadRows(data);
+                    ds.bulkLoadEnd(True);
+                }
+                assertEq(expected, ds.select(query), zone + ": " + mode);
+                assertEq((map $1 ?? NULL, stamps), ds.select("select tz from copy_zone_check order by id").tz,
+                    "instants preserved");
+            }
+            ds.commit();
+        }
     }
 
     private invalidZones() {

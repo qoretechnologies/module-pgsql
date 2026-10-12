@@ -5,6 +5,11 @@
     @tableofcontents
 
     @section pgsql35 pgsql Driver Version 3.5
+    - COPY and native bulk loading now write absolute date/time values in the datasource's time zone,
+      consistently with ordinary untyped inserts. Previously plain timestamps and dates could be shifted when
+      the input value used another zone. Existing rows are not changed by this fix
+    - COPY and native bulk loading now preserve relative date/time values using PostgreSQL interval syntax;
+      previously a duration could be silently stored with an incorrect value
     - empty PostgreSQL arrays are returned as empty lists reliably; reading an empty array
       could previously cause excessive memory use or terminate the process
     - a connection attempt ends as soon as its thread is cancelled or its %Qore \c Program is interrupted
