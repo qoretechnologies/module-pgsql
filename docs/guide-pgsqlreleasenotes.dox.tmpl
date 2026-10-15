@@ -32,6 +32,12 @@
       from the server's default time zone, server-side date/time functions (ex: \c now()::timestamp,
       \c current_date, \c to_char(), <tt>DEFAULT now()</tt>) now use the client's time zone; set the
       \c "timezone" option to the server's zone to keep the previous behaviour for them
+    - reading the \c "timezone" option of an open connection, as \c Datasource::getConfigHash() does to copy a
+      connection's configuration (ex: into another \c Datasource or a \c DatasourcePool), returns the zone set on
+      the session, which the option accepts again.  A connection whose Program's zone has no name the server
+      knows, such as a zone loaded from a file outside of any zoneinfo directory (an \c /etc/localtime that is a
+      plain file, as in some container images), returns none, and its copy uses the same Program zone; previously
+      the zone's file path was returned, and opening a copy failed with \c DBI:PGSQL:TIMEZONE-ERROR
     - <b>Upgrade note:</b> where the client's time zone differs from the server's default time zone, plain
       \c timestamp and \c date values written through connections without the \c "timezone" option differ from
       the values written before the upgrade, because the session now uses the client's zone instead of the server's:

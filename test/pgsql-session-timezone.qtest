@@ -34,6 +34,7 @@ class SessionTimeZoneTest inherits Test {
         addTestCase("without the option the session uses the Program's zone", \programZone());
         addTestCase("a zone loaded from a file is set by its region name", \fileZone());
         addTestCase("a zone without a region name keeps the session's zone", \unnamedZone());
+        addTestCase("a connection's configuration opens a copy in the same zone", \configCopy());
         addTestCase("invalid zones are rejected with a clear error", \invalidZones());
         addTestCase("COPY dates agree with bound inserts in the datasource zone", \copyDates());
         set_return_value(main());
@@ -257,11 +258,16 @@ class SessionTimeZoneTest inherits Test {
 
     # returns the TimeZone setting of a session opened by a qore process with the given TZ environment variable
     private string childSessionZone(string tz) {
+        return childRun(tz, "Datasource ds(ENV.QORE_DB_CONNSTR_PGSQL);\n"
+            "print(ds.selectRow(\"select pg_catalog.current_setting('TimeZone') as zone\").zone);\n");
+    }
+
+    #! Runs a script in a process whose local zone is @p tz and returns its output
+    private string childRun(string tz, string code) {
         string script = tmp_location() + DirSep + get_random_string() + ".q";
         File f();
         f.open2(script, O_CREAT | O_WRONLY | O_TRUNC);
-        f.write("%modern\n%requires pgsql\nDatasource ds(ENV.QORE_DB_CONNSTR_PGSQL);\n"
-            "print(ds.selectRow(\"select pg_catalog.current_setting('TimeZone') as zone\").zone);\n");
+        f.write("%modern\n%requires pgsql\n" + code);
         f.close();
         on_exit unlink(script);
         string cmd = sprintf("TZ='%s' QORE_MODULE_DIR='%s/../build:%s' qore '%s' 2>&1", tz, get_script_dir(),
@@ -298,6 +304,35 @@ class SessionTimeZoneTest inherits Test {
         on_exit unlink(zone_file);
         # the session keeps the zone it started with
         assertEq(server_zone, childSessionZone(":" + zone_file));
+    }
+
+    # a pool or a copy of a connection is opened from the connection's configuration, which reports its zone
+    private configCopy() {
+        serverZone();
+        string region = differentZone(Regions);
+        Datasource ds = withZone(region); on_exit ds.close();
+        assertEq(region, ds.getConfigHash().options.timezone, "a declared zone is reported as declared");
+        ds.rollback();
+        # a zone file outside of any zoneinfo directory: its name, a path, is no zone the option accepts
+        string dir = tmp_location() + DirSep + get_random_string();
+        mkdir(dir);
+        on_exit rmdir(dir);
+        string zone_file = dir + DirSep + "Zone";
+        File src();
+        src.open2("/usr/share/zoneinfo/" + region);
+        File dst();
+        dst.open2(zone_file, O_CREAT | O_WRONLY | O_TRUNC);
+        dst.write(src.readBinary(-1));
+        dst.close();
+        on_exit unlink(zone_file);
+        string out = childRun(":" + zone_file, "Datasource ds(ENV.QORE_DB_CONNSTR_PGSQL);\nds.open();\n"
+            "hash<auto> config = ds.getConfigHash();\n"
+            "Datasource copy(config);\n"
+            "printf(\"%s|%s|%s\\n\", config.options.timezone ?? \"none\", "
+            "ds.selectRow(\"select pg_catalog.current_setting('TimeZone') as zone\").zone, "
+            "copy.selectRow(\"select pg_catalog.current_setting('TimeZone') as zone\").zone);\n");
+        assertEq(sprintf("none|%s|%s\n", server_zone, server_zone), out,
+            "the copy opens and keeps the session's zone");
     }
 
     private copyDates() {

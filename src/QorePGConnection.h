@@ -757,7 +757,14 @@ public:
             return new QoreStringNode(opt_application_name.c_str());
 
         assert(!strcasecmp(opt, DBI_OPT_TIMEZONE));
-        return new QoreStringNode(tz_get_region_name(server_tz));
+        // the option reports only a value it accepts, so a copy of the connection's configuration (ex:
+        // Datasource::getConfigHash()) opens: the zone set on the session, or none when the Program's zone has no
+        // name the server knows, such as a zone loaded from a file outside of any zoneinfo directory (whose name
+        // is its path); the copy then uses the same Program zone
+        if (session_tz_set && !session_tz.name.empty()) {
+            return new QoreStringNode(session_tz.name);
+        }
+        return QoreValue();
     }
 
     DLLLOCAL int getNumeric() const { return numeric_support; }
