@@ -1,7 +1,7 @@
 pgsql (PostgreSQL) module for Qore
 by David Nichols / Qore Technologies, s.r.o.
 
-Requires qore 0.9+ and PostgreSQL client headers and libraries to build
+Requires qore 0.9+, a C++17 compiler, and PostgreSQL client headers and libraries to build
 
 This module is released under a choice of two licenses: LGPL 2.1 and MIT; see
 COPYING.LGPL and COPYING.MIT for more information
@@ -70,8 +70,8 @@ See COPYING.MIT and COPYING.LGPL for details on the open-source licenses.
 BUILD AND INSTALL
 -----------------
 
-PostgreSQL DBI module requires PostgreSQL 8+ client libraries and headers and
-is built with CMake.  If your PostgreSQL libraries are in a non-standard
+PostgreSQL DBI module requires PostgreSQL 8+ client libraries and headers, a
+C++17 compiler, and CMake.  If your PostgreSQL libraries are in a non-standard
 location, set the PostgreSQL_INCLUDE_DIR, PostgreSQL_TYPE_INCLUDE_DIR, and
 PostgreSQL_LIBRARY environment variables (or pass them as -D options to cmake).
 

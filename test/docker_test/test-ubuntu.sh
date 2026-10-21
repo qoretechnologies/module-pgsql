@@ -38,7 +38,7 @@ make install
 
 # add Qore user and group
 groupadd -o -g ${QORE_GID} qore
-useradd -o -m -d /home/qore -u ${QORE_UID} -g ${QORE_GID} qore
+useradd -r -o -m -d /home/qore -u ${QORE_UID} -g ${QORE_GID} qore
 
 # own everything by the qore user
 chown -R qore:qore ${MODULE_SRC_DIR}
