@@ -47,10 +47,12 @@ chown -R qore:qore ${MODULE_SRC_DIR}
 export QORE_MODULE_DIR=${MODULE_SRC_DIR}/qlib:${QORE_MODULE_DIR}
 cd ${MODULE_SRC_DIR}
 for test in test/*.qtest; do
-    gosu qore:qore qore $test -vv
+    gosu qore:qore qore -b --enable-debug $test -vv
     RESULTS="$RESULTS $?"
     date
 done
+
+gosu qore:qore python3 -W error test/test_connect_failover.py -v
 
 # check the results
 for R in $RESULTS; do

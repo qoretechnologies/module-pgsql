@@ -11,21 +11,21 @@
     - \c "string-numbers": return numeric types as strings in the server's text format (for backwards-compatibility):
       ex: \c "0.0001", \c "1.50" (with the column's scale), \c "NaN", \c "Infinity"
     - \c "numeric-numbers": return numeric types as arbitrary-precision number values
-    - \c "timezone": accepts a string argument that can be either an IANA region name (ex: \c "Europe/Prague") or a UTC offset east of UTC in whole minutes (ex: \c "+01:00" or \c "-05:30"); date/time values are written and read in this zone, and it is set as the session's time zone (<tt>SET TIME ZONE</tt>) when the connection is opened, when it is reestablished after it was lost, and when the option is changed on an open connection, so that server-side functions such as \c now(), \c current_date, \c date_trunc(), \c to_char() and column defaults such as <tt>DEFAULT now()</tt> use the same zone; an invalid zone raises a \c DBI:PGSQL:TIMEZONE-ERROR exception.  If this option is not set then the zone of the Program that opens the connection is used in the same way, including on the session; see @ref pgsql_timezone
+    - \c "timezone": accepts a string argument that can be either an IANA region name (ex: \c "Europe/Prague") or a UTC offset east of UTC in whole minutes (ex: \c "+01:00" or \c "-05:30"); date/time values are written and read in this zone, and it is set as the session's time zone (<tt>SET TIME ZONE</tt>) when the connection is opened, when it is reestablished after it was lost, and when the option is changed on an open connection, so that server-side functions such as \c now(), \c current_date, \c date_trunc(), \c to_char() and column defaults such as <tt>DEFAULT now()</tt> use the same zone; an invalid zone raises a \c DBI:PGSQL:TIMEZONE-ERROR exception.  If this option is not set then the zone of the Program that opens the connection is used in the same way, including on the session; see @ref pgsql_timezone and the @ref time_zones "Qore time zone reference"
     - \c "keepalives": a boolean option (default: @ref True) that controls whether client-side TCP keepalives are enabled on the connection (libpq \c keepalives); when @ref False, the keepalive tuning options below are ignored
     - \c "keepalives-idle": an integer option (default: \c 60) giving the number of seconds of connection idle time before the first TCP keepalive probe is sent (libpq \c keepalives_idle)
     - \c "keepalives-interval": an integer option (default: \c 10) giving the number of seconds between TCP keepalive probes after the first (libpq \c keepalives_interval)
     - \c "keepalives-count": an integer option (default: \c 3) giving the number of unacknowledged TCP keepalive probes after which the connection is considered dead (libpq \c keepalives_count)
-    - \c "connect-timeout": an integer option (default: \c 0) giving the maximum time in seconds to wait when establishing a connection (libpq \c connect_timeout); \c 0 uses the libpq default (no client-side limit)
+    - \c "connect-timeout": an integer option (default: \c 0) giving the maximum time in seconds for each connection endpoint (libpq \c connect_timeout); a timed-out host is skipped and the remaining hosts are tried with a fresh timeout. \c 0 means no client-side limit
     - \c "tcp-user-timeout": an integer option (default: \c 30000) giving the maximum time in milliseconds that transmitted data may remain unacknowledged before the connection is closed (libpq \c tcp_user_timeout, the \c TCP_USER_TIMEOUT socket option); this bounds how long a query in flight blocks when the server's host disappears without closing the connection; \c 0 uses the operating-system default; see @ref pgsql_connection_options
     - \c "application-name": a string option (unset by default) giving an application name reported to the server and shown in \c pg_stat_activity.application_name (libpq \c application_name); useful for identifying which client or connection pool owns each backend
 
     Options can be set in the \c Datasource or \c DatasourcePool constructors as in the following examples:
     @code{.py}
-    Dataource ds("pgsql:user/pass@db{numeric-numbers,timezone=Europe/Vienna}");
-    DataourcePool dsp("pgsql:user/pass@db%host.internal:5432{optimal-numbers}");
-    DataourcePool dsp2("pgsql:user/pass@db%host.internal:5432{keepalives-idle=30,connect-timeout=20}");
-    DataourcePool dsp3("pgsql:user/pass@db%host.internal:5432{tcp-user-timeout=15000}");
+    Datasource ds("pgsql:user/pass@db{numeric-numbers,timezone=Europe/Vienna}");
+    DatasourcePool dsp("pgsql:user/pass@db%host.internal:5432{optimal-numbers}");
+    DatasourcePool dsp2("pgsql:user/pass@db%host.internal:5432{keepalives-idle=30,connect-timeout=20}");
+    DatasourcePool dsp3("pgsql:user/pass@db%host.internal:5432{tcp-user-timeout=15000}");
     @endcode
 
     Options are stored separately for each connection.
@@ -33,6 +33,18 @@
     @section pgsql_connection_options Connection Options
 
     The connection options (\c "keepalives", \c "keepalives-idle", \c "keepalives-interval", \c "keepalives-count", \c "connect-timeout", \c "tcp-user-timeout", and \c "application-name") are applied to the underlying \c libpq connection when it is established, so changing them on an already-open \c Datasource or \c DatasourcePool takes effect on the next connection.
+
+    @par Multiple connection hosts
+    A comma-separated host list provides connection failover, for example:
+    @code{.py}
+    Datasource ledger("pgsql:writer/password@ledger%db1.internal,db2.internal,db3.internal:5432{connect-timeout=3}");
+    ledger.open();
+    @endcode
+    If the first host does not answer, the driver tries the remaining hosts after its three-second
+    timeout. Exhausting all hosts raises \c DBI:PGSQL:ERROR. An authentication failure stops the
+    connection attempt immediately, as in libpq; it is not a reason to try another host.
+    Cancellation and Program interruption remain effective during every attempt. Host, host-address
+    and port lists supplied through libpq environment variables or a service definition remain paired.
 
     TCP keepalives are enabled by default with an aggressive idle time (\c 60 seconds) so that the PostgreSQL server promptly detects and reaps backends left behind by an unclean client exit (for example, a client process killed with \c SIGKILL).  Without client-side keepalives, such orphaned backends remain idle on the server until the operating system's default keepalive timeout (often 2 hours), which can accumulate and exhaust the server's \c max_connections.  Set \c "keepalives" to @ref False to restore the previous behavior of relying solely on the operating-system defaults.
 

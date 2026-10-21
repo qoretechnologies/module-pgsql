@@ -8,6 +8,8 @@
 #cmakedefine HAVE_NETINET_IN_H
 #endif
 #cmakedefine HAVE_PQLIBVERSION
+#cmakedefine HAVE_PQCONNINFO
+#cmakedefine HAVE_PQHOSTADDR
 #cmakedefine HAVE_GCC_VISIBILITY
 
 #endif

@@ -17,6 +17,7 @@ class PgsqlConnectCancelTest inherits Test {
 
     constructor() : Test("PostgreSQL connection cancellation", "1.0", \ARGV) {
         addTestCase("a cancelled thread ends a blocked connection attempt", \cancelBlockedConnect());
+        addTestCase("cancellation ends a connection after host failover", \cancelAfterFailover());
         addTestCase("connect-timeout ends a blocked connection attempt", \connectTimeout());
         addTestCase("an interrupted Program ends a blocked connection attempt", \interruptBlockedConnect());
         set_return_value(main());
@@ -24,21 +25,21 @@ class PgsqlConnectCancelTest inherits Test {
 
     #! starts a server that accepts connections and never answers; returns the server, its port, and a queue that
     #! receives an entry for each connection accepted
-    private hash<auto> startSilentServer() {
+    private hash<auto> startSilentServer(string address = "127.0.0.1:0") {
         Socket server();
-        server.bind("127.0.0.1:0", True);
+        server.bind(address, True);
         server.listen();
         int port = server.getSocketInfo().port;
         Queue accepted();
         # the accepted sockets are kept open until the server is closed
         Counter running(1);
-        background sub () {
+        int tid = background sub () {
             on_exit running.dec();
             list<Socket> conns = ();
             while (True) {
                 *Socket s;
                 try {
-                    s = server.accept(100ms);
+                    s = server.accept();
                 } catch (hash<ExceptionInfo> ex) {
                     break;
                 }
@@ -48,29 +49,57 @@ class PgsqlConnectCancelTest inherits Test {
                 }
             }
         }();
-        return {"server": server, "port": port, "accepted": accepted, "running": running};
+        return {"server": server, "port": port, "accepted": accepted, "running": running, "tid": tid};
     }
 
     private stopSilentServer(hash<auto> srv) {
-        srv.server.shutdown();
-        srv.server.close();
+        cancel_thread(srv.tid, "silent server cleanup");
         srv.running.waitForZero();
+        srv.server.close();
     }
 
     #! returns a datasource for the silent server
-    private Datasource getDatasource(int port, *int connect_timeout) {
+    private Datasource getDatasource(int port, *int connect_timeout, string host = "127.0.0.1") {
         hash<auto> opts = {
             "type": "pgsql",
             "user": "nobody",
             "pass": "nothing",
             "db": "nothing",
-            "host": "127.0.0.1",
+            "host": host,
             "port": port,
         };
         if (connect_timeout) {
             opts.options = {"connect-timeout": connect_timeout};
         }
         return new Datasource(opts);
+    }
+
+    cancelAfterFailover() {
+        hash<auto> first = startSilentServer("127.0.0.2:0");
+        on_exit stopSilentServer(first);
+        hash<auto> second = startSilentServer(sprintf("127.0.0.1:%d", first.port));
+        on_exit stopSilentServer(second);
+        Queue done();
+        int tid = background sub () {
+            hash<auto> rv;
+            try {
+                Datasource ds = getDatasource(first.port, 1, "127.0.0.2,127.0.0.1");
+                ds.open();
+                rv.err = "NONE";
+            } catch (hash<ExceptionInfo> ex) {
+                rv.err = ex.err;
+            }
+            rv.end = clock_get_monotonic_us();
+            done.push(rv);
+        }();
+        # Accepting the second connection proves that the first timeout has already been handled.
+        assertTrue(first.accepted.get(10s));
+        assertTrue(second.accepted.get(10s));
+        int start = clock_get_monotonic_us();
+        cancel_thread(tid, "pgsql failover cancellation test");
+        hash<auto> rv = done.get(10s);
+        assertEq("THREAD-CANCELLED", rv.err);
+        assertLt(MaxCancelUs, rv.end - start);
     }
 
     cancelBlockedConnect() {

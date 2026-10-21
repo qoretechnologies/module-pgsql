@@ -5,6 +5,10 @@
     @tableofcontents
 
     @section pgsql35 pgsql Driver Version 3.5
+    - fixed multi-host connection failover after a timeout in the cancellable connection path:
+      a silent first host no longer prevents a connection to a healthy later host. Each selected
+      endpoint receives its own timeout; authentication failures still stop immediately, and
+      cancellation remains effective while connecting. This also applies when reopening a connection
     - COPY and native bulk loading now write absolute date/time values in the datasource's time zone,
       consistently with ordinary untyped inserts. Previously plain timestamps and dates could be shifted when
       the input value used another zone. Existing rows are not changed by this fix
@@ -21,7 +25,7 @@
       and when the option is changed on an open connection; previously the option only told the driver which
       zone the server used, so a connection whose option did not match the server's zone stored and returned
       plain \c timestamp values shifted by the difference.  Such connections now get consistent timestamp data,
-      and server-side date/time functions (\c now()::timestamp, \c current_date, \c date_trunc(),
+      and server-side date/time functions (<tt>CAST(now() AS timestamp)</tt>, \c current_date, \c date_trunc(),
       \c to_char(), and column defaults such as <tt>DEFAULT now()</tt>) now use the declared zone on them
     - without the \c "timezone" option, the zone of the Program that opens the connection, which the driver
       already used to write and read date/time values, is also set as the session's time zone (see
@@ -29,7 +33,7 @@
       a date/time value bound to a \c DATE column was stored with the calendar date in the server's zone (ex: a
       date in Europe/Prague read back one day earlier from a server in UTC), and plain \c timestamp values were
       stored and read back shifted by the difference.  <b>Behaviour change:</b> when the client's time zone differs
-      from the server's default time zone, server-side date/time functions (ex: \c now()::timestamp,
+      from the server's default time zone, server-side date/time functions (ex: <tt>CAST(now() AS timestamp)</tt>,
       \c current_date, \c to_char(), <tt>DEFAULT now()</tt>) now use the client's time zone; set the
       \c "timezone" option to the server's zone to keep the previous behaviour for them
     - reading the \c "timezone" option of an open connection, as \c Datasource::getConfigHash() does to copy a
@@ -41,8 +45,8 @@
     - <b>Upgrade note:</b> where the client's time zone differs from the server's default time zone, plain
       \c timestamp and \c date values written through connections without the \c "timezone" option differ from
       the values written before the upgrade, because the session now uses the client's zone instead of the server's:
-      this applies to values computed by the server in the session's zone (ex: <tt>now()::timestamp</tt>,
-      \c current_date, <tt>DEFAULT now()</tt>, <tt>date_trunc('month', now())::timestamp</tt>, or a
+      this applies to values computed by the server in the session's zone (ex: <tt>CAST(now() AS timestamp)</tt>,
+      \c current_date, <tt>DEFAULT now()</tt>, <tt>CAST(date_trunc('month', now()) AS timestamp)</tt>, or a
       \c timestamptz cast to \c timestamp in SQL) and to bound date/time values stored in such columns.  Rows
       written before and after the upgrade can therefore disagree (ex: a month start stored as \c "02:00" in a
       server zone ahead of UTC, now as \c "00:00"); an application that stores such values and compares them, or

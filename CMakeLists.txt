@@ -44,6 +44,8 @@ find_package(PostgreSQL 8.0.0 REQUIRED)
 set(CMAKE_REQUIRED_INCLUDES ${PostgreSQL_INCLUDE_DIRS})
 set(CMAKE_REQUIRED_LIBRARIES ${PostgreSQL_LIBRARY})
 check_cxx_symbol_exists(PQlibVersion libpq-fe.h HAVE_PQLIBVERSION)
+check_cxx_symbol_exists(PQconninfo libpq-fe.h HAVE_PQCONNINFO)
+check_cxx_symbol_exists(PQhostaddr libpq-fe.h HAVE_PQHOSTADDR)
 unset(CMAKE_REQUIRED_INCLUDES)
 unset(CMAKE_REQUIRED_LIBRARIES)
 

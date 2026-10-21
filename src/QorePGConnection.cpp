@@ -31,6 +31,7 @@
 
 #if (defined _WIN32 || defined __WIN32__) && ! defined __CYGWIN__
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #else
 #include <sys/socket.h>
 #include <poll.h>
@@ -47,6 +48,7 @@
 #include <memory>
 #include <typeinfo>
 #include <unordered_set>
+#include <vector>
 
 // Qore's native bulk-load DBI contract was added after the mutation-observer stream API.  Treat the
 // new method codes as an equivalent feature probe so build-tree headers with a stale generated
@@ -108,33 +110,286 @@ QorePGCancelHelper::~QorePGCancelHelper() {
 }
 
 #ifdef _QORE_HAS_CANCELLABLE_POLL
+using PgsqlConnectHolder = std::unique_ptr<PGconn, decltype(&PQfinish)>;
+
+#ifdef HAVE_PQCONNINFO
+// PQconnectPoll() has no public operation to advance past a timed-out server. Keep libpq in charge of
+// ordinary failures, authentication and target_session_attrs; after a timeout, restart with only that
+// host entry removed. In particular, never retry an authentication failure on another server.
+class PgsqlConnectTargets {
+public:
+    explicit PgsqlConnectTargets(PGconn* pc) : options(PQconninfo(pc), PQconninfoFree) {
+    }
+
+    bool init(ExceptionSink* xsink) {
+        if (!options) {
+            xsink->raiseException("DBI:PGSQL:ERROR", "could not allocate PostgreSQL connection options");
+            return false;
+        }
+        for (const PQconninfoOption* p = options.get(); p->keyword; ++p) {
+            if ((p - options.get()) % 100 == 0 && qore_check_cancel(xsink)) {
+                return false;
+            }
+            if (!strcmp(p->keyword, "host")) {
+                if (!split(p->val, hosts, xsink)) {
+                    return false;
+                }
+            } else if (!strcmp(p->keyword, "hostaddr")) {
+                if (!split(p->val, addresses, xsink)) {
+                    return false;
+                }
+            } else if (!strcmp(p->keyword, "port")) {
+                if (!split(p->val, ports, xsink)) {
+                    return false;
+                }
+                // An empty list element selects libpq's compiled-in port, not PGPORT. PQport()
+                // returns that expanded value, so normalize before matching the active entry.
+                assert(p->compiled);
+                default_port = p->compiled;
+                for (size_t i = 0; i < ports.size(); ++i) {
+                    if (i % 100 == 0 && qore_check_cancel(xsink)) {
+                        return false;
+                    }
+                    if (ports[i].empty()) {
+                        ports[i] = p->compiled;
+                    }
+                }
+            }
+        }
+        size_t count = std::max(hosts.size(), addresses.size());
+        // PQconnectStart already validated the list lengths. Empty host/hostaddr and a single port
+        // apply to every entry, including defaults supplied through PGSERVICE or the environment.
+        hosts.resize(count);
+        addresses.resize(count);
+        if (ports.size() == 1) {
+            ports.resize(count, ports.front());
+        }
+        assert(count && ports.size() == count);
+        return true;
+    }
+
+    PGconn* next(PGconn* pc, ExceptionSink* xsink) {
+        const char* host = PQhost(pc);
+        const char* port = PQport(pc);
+        // Older libpq versions return the original empty port instead of its default.
+        if (!*port) {
+            port = default_port.c_str();
+        }
+#ifdef HAVE_PQHOSTADDR
+        const char* address = PQhostaddr(pc);
+#endif
+        size_t match = hosts.size();
+        size_t default_match = hosts.size();
+        for (size_t i = 0; i < hosts.size(); ++i) {
+            if (i % 100 == 0 && qore_check_cancel(xsink)) {
+                return nullptr;
+            }
+            const std::string& expected_host = hosts[i].empty() ? addresses[i] : hosts[i];
+            if ((!expected_host.empty() && expected_host != host) || ports[i] != port) {
+                continue;
+            }
+#ifdef HAVE_PQHOSTADDR
+            if (!addresses[i].empty() && !sameAddress(addresses[i], address)) {
+                continue;
+            }
+#endif
+            if (expected_host.empty()) {
+                default_match = i;
+                continue;
+            }
+            match = i;
+            break;
+        }
+        // PQhost() expands an empty host to libpq's compiled-in socket directory. Prefer an exact
+        // match so that an earlier default socket that refused does not hide the active TCP host.
+        if (match == hosts.size()) {
+            match = default_match;
+        }
+        if (match != hosts.size()) {
+            hosts.erase(hosts.begin() + match);
+            addresses.erase(addresses.begin() + match);
+            ports.erase(ports.begin() + match);
+            if (hosts.empty()) {
+                return nullptr;
+            }
+            QoreString conninfo;
+            std::string host_list, address_list, port_list;
+            if (!join(hosts, host_list, xsink) || !join(addresses, address_list, xsink)
+                || !join(ports, port_list, xsink)) {
+                return nullptr;
+            }
+            for (const PQconninfoOption* p = options.get(); p->keyword; ++p) {
+                if ((p - options.get()) % 100 == 0 && qore_check_cancel(xsink)) {
+                    return nullptr;
+                }
+                const char* value = p->val;
+                if (!strcmp(p->keyword, "host")) {
+                    value = host_list.c_str();
+                } else if (!strcmp(p->keyword, "hostaddr")) {
+                    value = address_list.c_str();
+                } else if (!strcmp(p->keyword, "port")) {
+                    value = port_list.c_str();
+                }
+                if (value && !append(conninfo, p->keyword, value, xsink)) {
+                    return nullptr;
+                }
+            }
+            if (qore_check_cancel(xsink)) {
+                return nullptr;
+            }
+            PGconn* next = PQconnectStart(conninfo.c_str());
+            if (!next) {
+                xsink->raiseException("DBI:PGSQL:ERROR", "the PostgreSQL client library could not allocate a connection");
+            }
+            return next;
+        }
+        // Never retry an unidentified entry, which could repeat a timeout forever.
+        return nullptr;
+    }
+
+private:
+    std::unique_ptr<PQconninfoOption, decltype(&PQconninfoFree)> options;
+    std::vector<std::string> hosts, addresses, ports;
+    std::string default_port;
+
+    static bool split(const char* value, std::vector<std::string>& result, ExceptionSink* xsink) {
+        const char* start = value ? value : "";
+        const char* end;
+        while ((end = strchr(start, ','))) {
+            if (result.size() % 100 == 0 && qore_check_cancel(xsink)) {
+                return false;
+            }
+            result.emplace_back(start, end - start);
+            start = end + 1;
+        }
+        result.emplace_back(start);
+        return true;
+    }
+
+    static bool join(const std::vector<std::string>& values, std::string& result, ExceptionSink* xsink) {
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (i % 100 == 0 && qore_check_cancel(xsink)) {
+                return false;
+            }
+            if (i) {
+                result += ',';
+            }
+            result += values[i];
+        }
+        return true;
+    }
+
+    static bool append(QoreString& out, const char* keyword, const char* value, ExceptionSink* xsink) {
+        out.sprintf(" %s='", keyword);
+        for (const char* p = value; *p; ++p) {
+            if ((p - value) % 100 == 0 && qore_check_cancel(xsink)) {
+                return false;
+            }
+            if (*p == '\\' || *p == '\'') {
+                out.concat('\\');
+            }
+            out.concat(*p);
+        }
+        out.concat('\'');
+        return true;
+    }
+
+#ifdef HAVE_PQHOSTADDR
+    static bool sameAddress(const std::string& expected, const char* actual) {
+        if (expected == actual) {
+            return true;
+        }
+        // PQhostaddr normalizes numeric addresses; an expanded IPv6 literal must still match.
+        unsigned char left[16], right[16];
+        for (int family : {AF_INET, AF_INET6}) {
+            if (inet_pton(family, expected.c_str(), left) == 1 && inet_pton(family, actual, right) == 1) {
+                return !memcmp(left, right, family == AF_INET ? 4 : 16);
+            }
+        }
+        return false;
+    }
+#endif
+};
+#endif
+
+static std::string pgsql_connect_endpoint(PGconn* pc) {
+    std::string endpoint = PQhost(pc);
+    endpoint += '\n';
+    endpoint += PQport(pc);
+#ifdef HAVE_PQHOSTADDR
+    endpoint += '\n';
+    endpoint += PQhostaddr(pc);
+#endif
+    return endpoint;
+}
+
 // connects to the server with PQconnectStart() and PQconnectPoll(), waiting on the connection's socket with
 // qore_cancellable_poll(), so that a cancelled thread or an interrupted program ends a connection attempt as soon as
 // it is requested; PQconnectdb() blocks until the server answers or the connection attempt times out, which can be
-// never.  libpq does not apply connect_timeout to a connection made this way, so the timeout is applied here, with
-// the same exception as from PQconnectdb().  Returns nullptr only if an exception was raised; otherwise the caller
+// never. libpq does not apply connect_timeout to a connection made this way, so the timeout is applied here
+// separately to each selected endpoint; a timed-out host is removed before trying the remaining list.
+// Returns nullptr only if an exception was raised; otherwise the caller
 // checks the status of the connection returned
 static PGconn* pgsql_connect_cancellable(const char* conninfo, int connect_timeout_s, ExceptionSink* xsink) {
     if (qore_check_cancel(xsink)) {
         return nullptr;
     }
-    PGconn* pc = PQconnectStart(conninfo);
-    if (!pc) {
+    PgsqlConnectHolder holder(PQconnectStart(conninfo), PQfinish);
+    if (!holder) {
         xsink->raiseException("DBI:PGSQL:ERROR", "the PostgreSQL client library could not allocate a connection");
         return nullptr;
     }
+    PGconn* pc = holder.get();
+    if (PQstatus(pc) == CONNECTION_BAD) {
+        return holder.release();
+    }
+#ifdef HAVE_PQCONNINFO
+    std::unique_ptr<PgsqlConnectTargets> targets;
+#endif
+    std::string endpoint = pgsql_connect_endpoint(pc);
     // the absolute deadline in ms (monotonic), or -1 for no timeout
     int64 deadline = connect_timeout_s > 0
         ? q_clock_getmicros_monotonic() / 1000 + static_cast<int64>(connect_timeout_s) * 1000 : -1;
     // the first wait is for the socket to become writable, as with PQconnectPoll() after PQconnectStart()
     PostgresPollingStatusType st = PGRES_POLLING_WRITING;
     while (PQstatus(pc) != CONNECTION_BAD && st != PGRES_POLLING_OK && st != PGRES_POLLING_FAILED) {
+        if (qore_check_cancel(xsink)) {
+            return nullptr;
+        }
+        std::string current_endpoint = pgsql_connect_endpoint(pc);
+        if (current_endpoint != endpoint) {
+            endpoint = std::move(current_endpoint);
+            deadline = connect_timeout_s > 0
+                ? q_clock_getmicros_monotonic() / 1000 + static_cast<int64>(connect_timeout_s) * 1000 : -1;
+        }
         int timeout_ms = -1;
         if (deadline >= 0) {
             int64 remaining = deadline - q_clock_getmicros_monotonic() / 1000;
             if (remaining <= 0) {
-                // the same exception as for a connect_timeout in PQconnectdb(), with libpq's message
-                PQfinish(pc);
+#ifdef HAVE_PQCONNINFO
+                if (!targets) {
+                    targets.reset(new PgsqlConnectTargets(pc));
+                    if (!targets->init(xsink)) {
+                        return nullptr;
+                    }
+                }
+                PgsqlConnectHolder next(targets->next(pc, xsink), PQfinish);
+                if (*xsink) {
+                    return nullptr;
+                }
+                if (next) {
+                    holder = std::move(next);
+                    pc = holder.get();
+                    if (PQstatus(pc) == CONNECTION_BAD) {
+                        return holder.release();
+                    }
+                    endpoint = pgsql_connect_endpoint(pc);
+                    deadline = q_clock_getmicros_monotonic() / 1000
+                        + static_cast<int64>(connect_timeout_s) * 1000;
+                    st = PGRES_POLLING_WRITING;
+                    continue;
+                }
+#endif
                 xsink->raiseException("DBI:PGSQL:ERROR", "timeout expired");
                 return nullptr;
             }
@@ -146,12 +401,10 @@ static PGconn* pgsql_connect_cancellable(const char* conninfo, int connect_timeo
         pfd.revents = 0;
         int rc = qore_cancellable_poll(&pfd, 1, timeout_ms, xsink, "connecting to the PostgreSQL server");
         if (rc == QORE_POLL_CANCELLED) {
-            PQfinish(pc);
             return nullptr;
         }
         if (rc < 0) {
             int err = errno;
-            PQfinish(pc);
             xsink->raiseErrnoException("DBI:PGSQL:ERROR", err, "error waiting for the connection to the PostgreSQL "
                 "server");
             return nullptr;
@@ -162,7 +415,7 @@ static PGconn* pgsql_connect_cancellable(const char* conninfo, int connect_timeo
         }
         st = PQconnectPoll(pc);
     }
-    return pc;
+    return holder.release();
 }
 #else
 // with an older Qore library without a cancellable wait, the connection is checked for a cancellation before it is
