@@ -27,7 +27,9 @@ class PgsqlConnectCancelTest inherits Test {
     #! receives an entry for each connection accepted
     private hash<auto> startSilentServer(string address = "127.0.0.1:0") {
         Socket server();
-        server.bind(address, True);
+        if (server.bind(address, True)) {
+            throw "SILENT-SERVER-ERROR", sprintf("cannot bind to %y: %s", address, strerror());
+        }
         server.listen();
         int port = server.getSocketInfo().port;
         Queue accepted();
@@ -75,6 +77,15 @@ class PgsqlConnectCancelTest inherits Test {
     }
 
     cancelAfterFailover() {
+        # the first host is a second loopback address; Linux routes all of 127.0.0.0/8 to the loopback interface, but
+        # macOS configures only 127.0.0.1 unless another address is added to lo0
+        {
+            Socket probe();
+            if (probe.bind("127.0.0.2:0", True)) {
+                testSkip("127.0.0.2 is not a local address on this host (on macOS: sudo ifconfig lo0 alias 127.0.0.2)");
+            }
+            probe.close();
+        }
         hash<auto> first = startSilentServer("127.0.0.2:0");
         on_exit stopSilentServer(first);
         hash<auto> second = startSilentServer(sprintf("127.0.0.1:%d", first.port));
