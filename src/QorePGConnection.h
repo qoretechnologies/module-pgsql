@@ -456,7 +456,9 @@ public:
 
 private:
     PGconn* conn;
-    QoreSandboxManagerHelper smh;
+    //! the governing sandbox, whose interrupt cancels the running query; not a policy check, so a
+    //! system-policy capability (a policy barrier) does not stop the sandbox from interrupting it
+    QoreSandboxManagerHelper smh{QoreSandboxManagerHelper::All};
     // Use atomic pointer for thread safety with callback invocation
     std::atomic<PGcancel*> cancel_obj;
 };
