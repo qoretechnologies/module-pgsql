@@ -32,96 +32,79 @@ class PgsqlCancelCallbackTest inherits QUnit::Test {
         testSkip("QORE_DB_CONNSTR_PGSQL not set; skipping cancel callback tests");
     }
 
-    #! Test that PostgreSQL operations can be cancelled via the cancel callback
-    testPgsqlCancel() {
-        SandboxManager sm();
-        Queue resultQueue();
+    #! The sandboxed code (pg_advisory_lock() returns void, which the driver does not convert, so it is selected in a
+    #! subquery): it takes a session-level advisory lock, which the test waits for, then runs the statement
+    #! under test, whose first action releases the lock; so the test's own request for the lock returns exactly when
+    #! the statement is executing on the server, with no sleep and no polling
+    const SandboxSource = "
+%new-style
+%require-types
+%strict-args
 
-        Program p(PO_NO_CHILD_PO_RESTRICTIONS);
-        p.setSandboxManager(sm);
-        p.loadModule("pgsql");
-
-        p.parse(sprintf("
-%%new-style
-%%require-types
-%%strict-args
-
-sub runQuery(Queue q, string connstr) {
+sub runStatement(Queue q, string connstr, int key, string sql) {
     Datasource ds(connstr);
     ds.setAutoCommit(True);
-    q.push('connected');
-
+    ds.exec('SELECT count(*) FROM (SELECT pg_advisory_lock(%v)) l', key);
+    q.push('locked');
     try {
-        # Run a query that takes some time
-        # pg_sleep(10) will sleep for 10 seconds
-        ds.exec('SELECT pg_sleep(10)');
+        ds.exec(sql);
         q.push({'cancelled': False});
     } catch (hash<ExceptionInfo> ex) {
         q.push({'cancelled': True, 'err': ex.err, 'desc': ex.desc});
     }
 }
-        ", "pgsql_cancel"), "pgsql_cancel_test");
+";
 
-        background p.callFunction("runQuery", resultQueue, connstr);
+    #! the longest the test waits for the sandboxed code; a guard against a hang, never an expected time
+    const ResultTimeout = 30s;
 
-        auto connected = resultQueue.get(10s);
-        assertEq("connected", connected, "Connected to PostgreSQL");
-
-        # Give time for the query to start executing
-        usleep(500ms);
-
-        # Request interrupt - this should trigger PQcancel via the cancel callback
-        sm.requestInterrupt();
-
-        # Wait for the result
-        hash<auto> result = resultQueue.get(5s);
-        assertEq(True, result.cancelled, "PostgreSQL query was cancelled");
-        # The error could be PROGRAM-INTERRUPTED or a database-specific cancellation error
-        assertEq(True, exists result.err, "Exception was thrown: " + result.err);
-    }
-
-    #! Test PostgreSQL cancel when query is blocked on server
-    testPgsqlBlockedCancel() {
+    #! Interrupts a sandboxed statement once it is executing, and returns what the statement's caller saw
+    /** @param sql the statement under test, with \c %d for the advisory lock key, which the statement must release
+        first
+        @param hold an advisory lock key that the test holds while the statement runs, or 0
+    */
+    private hash<auto> interruptExecuting(string sql, int hold = 0) {
         SandboxManager sm();
         Queue resultQueue();
-
         Program p(PO_NO_CHILD_PO_RESTRICTIONS);
         p.setSandboxManager(sm);
         p.loadModule("pgsql");
+        p.parse(SandboxSource, "pgsql_cancel_sandbox");
 
-        p.parse(sprintf("
-%%new-style
-%%require-types
-%%strict-args
+        int key = 1000000 + (now_us() % 1000000);
+        Datasource test(connstr);
+        test.setAutoCommit(True);
+        if (hold) {
+            test.exec("SELECT count(*) FROM (SELECT pg_advisory_lock(%v)) l", hold);
+        }
+        on_exit {
+            test.exec("SELECT count(*) FROM (SELECT pg_advisory_unlock_all()) l");
+        }
 
-sub runBlockingQuery(Queue q, string connstr) {
-    Datasource ds(connstr);
-    ds.setAutoCommit(True);
-    q.push('connected');
+        background p.callFunction("runStatement", resultQueue, connstr, key, sprintf(sql, key));
+        assertEq("locked", resultQueue.get(ResultTimeout), "the sandboxed connection holds the lock");
+        # returns when the statement under test has released the lock: it is executing on the server
+        test.exec("SELECT count(*) FROM (SELECT pg_advisory_lock(%v)) l", key);
 
-    try {
-        # This will block waiting on the server
-        ds.exec('SELECT pg_sleep(60)');
-        q.push({'cancelled': False});
-    } catch (hash<ExceptionInfo> ex) {
-        q.push({'cancelled': True, 'err': ex.err});
-    }
-}
-        ", "pgsql_blocked"), "pgsql_blocked_test");
-
-        background p.callFunction("runBlockingQuery", resultQueue, connstr);
-
-        auto connected = resultQueue.get(10s);
-        assertEq("connected", connected, "Connected to PostgreSQL");
-
-        # Wait for query to be fully blocked on server
-        usleep(1s);
-
-        # Request interrupt
+        # the interrupt runs the connection's cancel callback, which cancels the executing statement
         sm.requestInterrupt();
+        return resultQueue.get(ResultTimeout);
+    }
 
-        # Should return quickly after cancel
-        hash<auto> result = resultQueue.get(5s);
-        assertEq(True, result.cancelled, "Blocked PostgreSQL query was cancelled");
+    #! An executing statement is cancelled by the cancel callback when its sandbox is interrupted
+    testPgsqlCancel() {
+        hash<auto> result = interruptExecuting("DO $$ BEGIN PERFORM pg_advisory_unlock(%d); "
+            "PERFORM pg_sleep(60); END $$");
+        assertEq(True, result.cancelled, "the executing statement was cancelled");
+        assertTrue(exists result.err, "the statement's caller saw an exception: " + result.err);
+    }
+
+    #! A statement blocked on the server is cancelled by the cancel callback when its sandbox is interrupted
+    testPgsqlBlockedCancel() {
+        int blocker = 2000000 + (now_us() % 1000000);
+        hash<auto> result = interruptExecuting(sprintf("DO $$ BEGIN PERFORM pg_advisory_unlock(%%d); "
+            "PERFORM pg_advisory_lock(%d); END $$", blocker), blocker);
+        assertEq(True, result.cancelled, "the statement blocked on a lock was cancelled");
+        assertTrue(exists result.err, "the statement's caller saw an exception: " + result.err);
     }
 }
