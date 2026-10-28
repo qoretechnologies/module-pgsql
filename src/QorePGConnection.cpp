@@ -3976,6 +3976,13 @@ int QorePGConnection::rollback(ExceptionSink *xsink) {
 }
 
 int QorePGConnection::begin_transaction(ExceptionSink *xsink) {
+    // starting a transaction that is already open is a no-op: PostgreSQL refuses BEGIN in an open (or failed)
+    // transaction with a warning, which it writes to its log; a connection in an unknown state still sends BEGIN,
+    // so that a lost connection is detected and handled when the transaction is started
+    PGTransactionStatusType status = PQtransactionStatus(pc);
+    if (status == PQTRANS_INTRANS || status == PQTRANS_INERROR) {
+        return 0;
+    }
     QorePgsqlStatement res(this, ds->getQoreEncoding());
     return res.exec("begin", xsink);
 }

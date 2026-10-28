@@ -5,6 +5,9 @@
     @tableofcontents
 
     @section pgsql35 pgsql Driver Version 3.5
+    - starting a transaction that is already open, for example with \c Datasource::beginTransaction() in an open
+      transaction, no longer sends \c BEGIN to the server, which refused it with a warning that it wrote to its log
+      for every such call
     - building the driver now requires a C++17 compiler, matching the language features
       used by current Qore public headers
     - fixed multi-host connection failover after a timeout in the cancellable connection path:

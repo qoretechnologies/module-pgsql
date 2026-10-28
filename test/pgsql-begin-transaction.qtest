@@ -1,0 +1,126 @@
+#!/usr/bin/env qore
+# Copyright 2026 Qore Technologies, s.r.o.
+%modern
+%requires QUnit
+%prepend-module-path "${SCRIPT_DIR}/../build"
+%requires pgsql
+%exec-class BeginTransactionTest
+
+# Starting a transaction that is already open sends nothing to the server: PostgreSQL refuses BEGIN in an open or
+# failed transaction with a warning that it writes to its log.  The statements a connection sends are observed from a
+# second connection in pg_stat_activity, which shows the last statement that each backend started.
+class BeginTransactionTest inherits Test {
+    private {
+        int serial;
+    }
+
+    constructor() : Test("PostgreSQL BEGIN in an open transaction", "1.0", \ARGV) {
+        addTestCase("a new transaction sends BEGIN", \newTransaction());
+        addTestCase("an open transaction sends nothing and stays intact", \openTransaction());
+        addTestCase("a failed transaction sends nothing and can be rolled back", \failedTransaction());
+        addTestCase("a pooled connection in a transaction sends nothing", \pooledTransaction());
+        set_return_value(main());
+    }
+
+    private string connstr() {
+        if (!ENV.QORE_DB_CONNSTR_PGSQL) {
+            testSkip("set QORE_DB_CONNSTR_PGSQL to a disposable PostgreSQL database");
+        }
+        return ENV.QORE_DB_CONNSTR_PGSQL;
+    }
+
+    private Datasource open() {
+        Datasource ds(connstr());
+        ds.open();
+        return ds;
+    }
+
+    # returns the backend's last started statement and its state, as seen from another connection
+    private hash<auto> activity(Datasource observer, int pid) {
+        on_exit observer.rollback();
+        *hash<auto> row = observer.selectRow("select query, state from pg_catalog.pg_stat_activity where pid = %v",
+            pid);
+        assertTrue(exists row, "the observed backend is listed");
+        return row;
+    }
+
+    # runs a statement that identifies the point in the test and returns its text
+    private string marker(AbstractDatasource ds) {
+        string sql = sprintf("select 'begin-transaction-marker-%d-%d' as marker", getpid(), ++serial);
+        ds.exec(sql);
+        return sql;
+    }
+
+    private newTransaction() {
+        Datasource ds = open();
+        on_exit ds.close();
+        Datasource observer = open();
+        on_exit observer.close();
+        int pid = ds.selectRow("select pg_backend_pid() as pid").pid;
+        ds.rollback();
+
+        ds.beginTransaction();
+        hash<auto> row = activity(observer, pid);
+        assertEq("begin", row.query, "the transaction is started on the server");
+        assertEq("idle in transaction", row.state, "the backend is in a transaction");
+        ds.rollback();
+    }
+
+    private openTransaction() {
+        Datasource ds = open();
+        on_exit ds.close();
+        Datasource observer = open();
+        on_exit observer.close();
+        on_exit ds.rollback();
+        int pid = ds.selectRow("select pg_backend_pid() as pid").pid;
+        ds.beginTransaction();
+        ds.exec("create temporary table begin_probe (id int) on commit drop");
+        ds.exec("insert into begin_probe values (1)");
+        string sql = marker(ds);
+
+        ds.beginTransaction();
+        hash<auto> row = activity(observer, pid);
+        assertEq(sql, row.query, "nothing is sent to the server");
+        assertEq("idle in transaction", row.state, "the backend is still in the transaction");
+        assertTrue(ds.inTransaction(), "the datasource is still in the transaction");
+        assertEq(1, ds.selectRow("select count(*) as cnt from begin_probe").cnt.toInt(),
+            "the transaction's work is intact");
+        ds.commit();
+        assertEq("idle", activity(observer, pid).state, "the transaction is committed");
+    }
+
+    private failedTransaction() {
+        Datasource ds = open();
+        on_exit ds.close();
+        Datasource observer = open();
+        on_exit observer.close();
+        on_exit ds.rollback();
+        int pid = ds.selectRow("select pg_backend_pid() as pid").pid;
+        ds.beginTransaction();
+        string failed = "select 1 / 0 as failure";
+        assertThrows("DBI:PGSQL:ERROR", \ds.exec(), (failed,), "the statement fails the transaction");
+
+        ds.beginTransaction();
+        hash<auto> row = activity(observer, pid);
+        assertEq(failed, row.query, "nothing is sent to the server");
+        assertEq("idle in transaction (aborted)", row.state, "the backend is still in the failed transaction");
+        ds.rollback();
+        assertEq(1, ds.selectRow("select 1 as one").one.toInt(), "the connection is usable after the rollback");
+    }
+
+    private pooledTransaction() {
+        DatasourcePool pool(connstr());
+        Datasource observer = open();
+        on_exit observer.close();
+        on_exit pool.rollback();
+        pool.beginTransaction();
+        int pid = pool.selectRow("select pg_backend_pid() as pid").pid;
+        string sql = marker(pool);
+
+        pool.beginTransaction();
+        hash<auto> row = activity(observer, pid);
+        assertEq(sql, row.query, "nothing is sent to the server");
+        assertEq("idle in transaction", row.state, "the backend is still in the transaction");
+        pool.rollback();
+    }
+}
