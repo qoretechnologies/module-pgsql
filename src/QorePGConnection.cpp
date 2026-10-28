@@ -3965,12 +3965,27 @@ int QorePGConnection::applySessionTimeZone(const QorePGTimeZoneSpec& spec, Excep
     return 0;
 }
 
+// returns true if the server has no transaction open on the connection: then COMMIT and ROLLBACK are no-ops, which
+// PostgreSQL refuses with a warning that it writes to its log.  A datasource ends its transaction even when no
+// statement of it started one on the server, as after a select through an SQLStatement, which takes the transaction
+// lock without sending BEGIN.  A connection in an unknown state is not idle, so that a lost connection is still
+// detected when the transaction is ended.
+static bool qpg_server_idle(PGconn* pc) {
+    return pc && PQtransactionStatus(pc) == PQTRANS_IDLE;
+}
+
 int QorePGConnection::commit(ExceptionSink *xsink) {
+    if (qpg_server_idle(pc)) {
+        return 0;
+    }
     QorePgsqlStatement res(this, ds->getQoreEncoding());
     return res.exec("commit", xsink);
 }
 
 int QorePGConnection::rollback(ExceptionSink *xsink) {
+    if (qpg_server_idle(pc)) {
+        return 0;
+    }
     QorePgsqlStatement res(this, ds->getQoreEncoding());
     return res.exec("rollback", xsink);
 }

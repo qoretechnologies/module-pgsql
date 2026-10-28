@@ -1,0 +1,146 @@
+#!/usr/bin/env qore
+# Copyright 2026 Qore Technologies, s.r.o.
+%modern
+%requires QUnit
+%prepend-module-path "${SCRIPT_DIR}/../build"
+%requires pgsql
+%exec-class TransactionEndTest
+
+# Ending a transaction that the server never started sends nothing to the server: PostgreSQL refuses COMMIT and
+# ROLLBACK outside a transaction with a warning that it writes to its log.  A select through an SQLStatement takes the
+# datasource's transaction lock without starting a transaction on the server.  The statements a connection sends are
+# observed from a second connection in pg_stat_activity, which shows the last statement that each backend started.
+class TransactionEndTest inherits Test {
+    private {
+        int serial;
+    }
+
+    constructor() : Test("PostgreSQL COMMIT and ROLLBACK without a server transaction", "1.0", \ARGV) {
+        addTestCase("a rollback after a statement select sends nothing", \rollbackIdle());
+        addTestCase("a commit after a statement select sends nothing", \commitIdle());
+        addTestCase("a rollback of an open transaction is sent and undoes its work", \rollbackOpen());
+        addTestCase("a commit of an open transaction is sent and keeps its work", \commitOpen());
+        addTestCase("a rollback of a failed transaction is sent and ends it", \rollbackFailed());
+        set_return_value(main());
+    }
+
+    private Datasource open() {
+        if (!ENV.QORE_DB_CONNSTR_PGSQL) {
+            testSkip("set QORE_DB_CONNSTR_PGSQL to a disposable PostgreSQL database");
+        }
+        Datasource ds(ENV.QORE_DB_CONNSTR_PGSQL);
+        ds.open();
+        return ds;
+    }
+
+    # returns the backend's last started statement and its state, as seen from another connection
+    private hash<auto> activity(Datasource observer, int pid) {
+        on_exit observer.rollback();
+        *hash<auto> row = observer.selectRow("select query, state from pg_catalog.pg_stat_activity where pid = %v",
+            pid);
+        assertTrue(exists row, "the observed backend is listed");
+        return row;
+    }
+
+    # selects through an SQLStatement, which takes the transaction lock without a server transaction
+    private string statementSelect(Datasource ds) {
+        string sql = sprintf("select 'transaction-end-marker-%d-%d' as marker", getpid(), ++serial);
+        SQLStatement stmt(ds);
+        stmt.prepare(sql);
+        stmt.exec();
+        assertTrue(stmt.next(), "the select returns its row");
+        assertEq(sprintf("transaction-end-marker-%d-%d", getpid(), serial), stmt.fetchRow().marker);
+        stmt.close();
+        assertTrue(ds.currentThreadInTransaction(), "the statement holds the transaction lock");
+        return sql;
+    }
+
+    private int backendPid(Datasource ds) {
+        int rv = ds.selectRow("select pg_backend_pid() as pid").pid;
+        ds.rollback();
+        return rv;
+    }
+
+    private rollbackIdle() {
+        Datasource ds = open();
+        on_exit ds.close();
+        Datasource observer = open();
+        on_exit observer.close();
+        int pid = backendPid(ds);
+        string sql = statementSelect(ds);
+
+        ds.rollback();
+        hash<auto> row = activity(observer, pid);
+        assertEq(sql, row.query, "nothing is sent to the server");
+        assertEq("idle", row.state, "the backend has no transaction");
+        assertFalse(ds.currentThreadInTransaction(), "the transaction lock is released");
+        assertEq(1, ds.selectRow("select 1 as one").one.toInt(), "the connection is usable");
+        ds.rollback();
+    }
+
+    private commitIdle() {
+        Datasource ds = open();
+        on_exit ds.close();
+        Datasource observer = open();
+        on_exit observer.close();
+        int pid = backendPid(ds);
+        string sql = statementSelect(ds);
+
+        ds.commit();
+        hash<auto> row = activity(observer, pid);
+        assertEq(sql, row.query, "nothing is sent to the server");
+        assertEq("idle", row.state, "the backend has no transaction");
+        assertFalse(ds.currentThreadInTransaction(), "the transaction lock is released");
+    }
+
+    private rollbackOpen() {
+        Datasource ds = open();
+        on_exit ds.close();
+        Datasource observer = open();
+        on_exit observer.close();
+        int pid = backendPid(ds);
+        ds.exec("create temporary table end_probe (id int)");
+        ds.commit();
+        ds.exec("insert into end_probe values (1)");
+
+        ds.rollback();
+        assertEq("rollback", activity(observer, pid).query, "the rollback is sent");
+        assertEq(0, ds.selectRow("select count(*) as cnt from end_probe").cnt.toInt(), "the insert is undone");
+        ds.rollback();
+    }
+
+    private commitOpen() {
+        Datasource ds = open();
+        on_exit ds.close();
+        Datasource observer = open();
+        on_exit observer.close();
+        int pid = backendPid(ds);
+        ds.exec("create temporary table end_probe (id int)");
+        ds.exec("insert into end_probe values (1)");
+
+        ds.commit();
+        assertEq("commit", activity(observer, pid).query, "the commit is sent");
+        ds.exec("insert into end_probe values (2)");
+        ds.rollback();
+        assertEq(1, ds.selectRow("select count(*) as cnt from end_probe").cnt.toInt(),
+            "the committed row is kept");
+        ds.rollback();
+    }
+
+    private rollbackFailed() {
+        Datasource ds = open();
+        on_exit ds.close();
+        Datasource observer = open();
+        on_exit observer.close();
+        int pid = backendPid(ds);
+        ds.beginTransaction();
+        assertThrows("DBI:PGSQL:ERROR", \ds.exec(), ("select 1 / 0 as failure",), "the statement fails the transaction");
+
+        ds.rollback();
+        hash<auto> row = activity(observer, pid);
+        assertEq("rollback", row.query, "the rollback is sent");
+        assertEq("idle", row.state, "the failed transaction is ended");
+        assertEq(1, ds.selectRow("select 1 as one").one.toInt(), "the connection is usable");
+        ds.rollback();
+    }
+}

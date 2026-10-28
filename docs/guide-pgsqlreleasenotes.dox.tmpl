@@ -8,6 +8,9 @@
     - starting a transaction that is already open, for example with \c Datasource::beginTransaction() in an open
       transaction, no longer sends \c BEGIN to the server, which refused it with a warning that it wrote to its log
       for every such call
+    - ending a transaction that the server never started, for example with \c Datasource::rollback() after a
+      select through an \c SQLStatement, no longer sends \c COMMIT or \c ROLLBACK to the server, which refused it
+      with a warning that it wrote to its log
     - building the driver now requires a C++17 compiler, matching the language features
       used by current Qore public headers
     - fixed multi-host connection failover after a timeout in the cancellable connection path:
