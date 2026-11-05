@@ -16,8 +16,8 @@ default:
 
 variables:
   REPO_NAME: module-pgsql
-  POSTGRES_PASSWORD: omq
-  POSTGRES_PASSWORD_MAP: pgsql=omq
+  POSTGRES_PASSWORD: qore
+  POSTGRES_PASSWORD_MAP: pgsql=qore
   TZ: 'Europe/Prague'
   PGTZ: 'Europe/Prague'
 
