@@ -30,6 +30,8 @@ echo "export QORE_GID=1000" >> ${ENV_FILE}
 
 export MAKE_JOBS=4
 
+python3 "${MODULE_SRC_DIR}/test/test_tree_tested.py"
+
 # build module and install
 echo && echo "-- building module --"
 mkdir -p ${MODULE_SRC_DIR}/build
