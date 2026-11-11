@@ -812,8 +812,23 @@ public:
         const QoreHashNode* arg = getExceptionArg(res, xsink);
 
         xsink->raiseExceptionArg("DBI:PGSQL:ERROR", arg, desc);
+        checkStandbyReadOnly(res, xsink);
         return -1;
     }
+
+    //! Reconnects a connection that a write was refused on because its server is a hot standby
+    /** A primary that is demoted in a failover keeps serving its sessions, and a session that reconnected while the
+        old primary was still the target of its address reaches it again as a standby: every write then fails with
+        SQLSTATE @c 25006 (read_only_sql_transaction) on a connection that is otherwise healthy, so a retry on the
+        same connection fails the same way for as long as the session lives.  When the server reports
+        @c in_hot_standby, the connection is reset at once: the next statement runs on a new connection made
+        through the connection's address, which reaches the current primary.  In a transaction, the transaction is
+        lost with the session, and @c DBI:PGSQL:CONNECTION-ERROR is raised as when the connection is lost in a
+        transaction.  A read-only transaction a session asked for on a primary keeps its connection.
+
+        @return 0 if nothing had to be done or the connection was reset, -1 for error (exception raised)
+    */
+    DLLLOCAL int checkStandbyReadOnly(const PGresult* res, ExceptionSink* xsink);
 
     DLLLOCAL PGconn* get() const {
         return pc;

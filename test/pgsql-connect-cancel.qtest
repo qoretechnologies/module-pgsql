@@ -158,6 +158,10 @@ class PgsqlConnectCancelTest inherits Test {
         hash<auto> srv = startSilentServer();
         on_exit stopSilentServer(srv);
         SandboxManager sm();
+        # the manager is there for interrupts only: it allows every destination, so the connection is not
+        # checked against a network or filesystem policy (qore#5747)
+        sm.setNetworkDefaultPolicy(True);
+        sm.setFilesystemDefaultPolicy(True);
         Program p(PO_NEW_STYLE);
         p.setSandboxManager(sm);
         p.parse(sprintf("%%requires pgsql\nsub run() { Datasource ds({\"type\": \"pgsql\", \"user\": \"nobody\", "

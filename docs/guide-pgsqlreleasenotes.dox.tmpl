@@ -10,6 +10,12 @@
       addresses only (see @ref pgsqlsandbox)
     - the user name, password, database and host of a connection are quoted correctly: a value with a quote or a
       backslash could not be used, and could add connection keywords of its own
+    - a write that a hot standby refuses (\c SQLSTATE 25006, a read-only transaction) now reconnects the
+      connection, so the next statement reaches the current primary through the connection's address; previously
+      a connection that reached a demoted primary after a failover refused every write for as long as it lived, and
+      an application retrying the transaction never recovered.  In a transaction, the transaction is lost with the
+      connection, and \c DBI:PGSQL:CONNECTION-ERROR is raised after the refusal, as when a connection is lost in a
+      transaction.  A read-only transaction that a session asks for on a primary keeps its connection
     - starting a transaction that is already open, for example with \c Datasource::beginTransaction() in an open
       transaction, no longer sends \c BEGIN to the server, which refused it with a warning that it wrote to its log
       for every such call
