@@ -4932,6 +4932,36 @@ int QorePGConnection::get_server_version() const {
     return PQserverVersion(pc);
 }
 
+int QorePGConnection::checkStandbyReadOnly(const PGresult* res, ExceptionSink* xsink) {
+    if (!res || !pc || PQstatus(pc) != CONNECTION_OK) {
+        return 0;
+    }
+    const char* sql_state = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+    if (!sql_state || strcmp(sql_state, "25006")) {
+        return 0;
+    }
+    // reported by servers since PostgreSQL 14 at connection time and whenever it changes
+    const char* standby = PQparameterStatus(pc, "in_hot_standby");
+    if (!standby || strcmp(standby, "on")) {
+        return 0;
+    }
+    printd(5, "QorePGConnection::checkStandbyReadOnly() this: %p a write was refused by a hot standby; "
+        "reconnecting\n", this);
+    // the transaction ends with the session, as when the connection is lost in a transaction: the caller is told
+    // so, and restarts it on the new connection
+    if (ds->activeTransaction()) {
+        doLostConnectionError(true, res, xsink);
+    }
+    PQreset(pc);
+    // a new session has the server's default client encoding and zone; set the connection's own before anything
+    // else runs, as after any reconnection
+    if (PQstatus(pc) == CONNECTION_OK) {
+        return restoreSession(xsink);
+    }
+    // the next statement finds the connection lost and reconnects then
+    return 0;
+}
+
 // static
 QoreHashNode* QorePGConnection::getExceptionArg(const PGresult *res, ExceptionSink *xsink) {
     QoreHashNode* arg = new QoreHashNode(autoTypeInfo);
