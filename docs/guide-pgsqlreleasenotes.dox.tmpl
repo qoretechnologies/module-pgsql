@@ -5,6 +5,11 @@
     @tableofcontents
 
     @section pgsql35 pgsql Driver Version 3.5
+    - in a %Qore version that checks DBI connections against the sandbox, the driver reports every destination of a
+      connection, including the ones that libpq takes from its environment and defaults, and connects to the checked
+      addresses only (see @ref pgsqlsandbox)
+    - the user name, password, database and host of a connection are quoted correctly: a value with a quote or a
+      backslash could not be used, and could add connection keywords of its own
     - a write that a hot standby refuses (\c SQLSTATE 25006, a read-only transaction) now reconnects the
       connection, so the next statement reaches the current primary through the connection's address; previously
       a connection that reached a demoted primary after a failover refused every write for as long as it lived, and

@@ -31,6 +31,18 @@
 
 #include <libpq-fe.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cerrno>
+#include <cstdlib>
+#include <memory>
+#include <mutex>
+
+#include <netdb.h>
+#include <sys/socket.h>
+#include <string>
+#include <vector>
+
 void init_pgsql_functions(QoreNamespace& ns);
 void init_pgsql_constants(QoreNamespace& ns);
 
@@ -168,26 +180,402 @@ static int qore_pgsql_bulk_load_end(Datasource* ds, bool success, ExceptionSink*
 }
 #endif
 
+//! Appends a keyword with a quoted value to a libpq connection string
+/** The value is escaped as libpq requires, so that a value cannot end the quotes and add keywords of its own
+*/
+static void pgsql_append_conninfo(QoreString& out, const char* keyword, const char* value) {
+    out.sprintf("%s='", keyword);
+    for (const char* p = value; *p; ++p) {
+        if (*p == '\\' || *p == '\'') {
+            out.concat('\\');
+        }
+        out.concat(*p);
+    }
+    out.concat("' ");
+}
+
+//! Builds the libpq connection string of a datasource; the host and port are left out if \a host_port is false
+static void pgsql_conninfo(Datasource* ds, QoreString& lstr, bool host_port = true) {
+    if (ds->getUsername()) {
+        pgsql_append_conninfo(lstr, "user", ds->getUsername());
+    }
+    if (ds->getPassword()) {
+        pgsql_append_conninfo(lstr, "password", ds->getPassword());
+    }
+    if (ds->getDBName()) {
+        pgsql_append_conninfo(lstr, "dbname", ds->getDBName());
+    }
+    if (host_port) {
+        if (ds->getHostName()) {
+            pgsql_append_conninfo(lstr, "host", ds->getHostName());
+        }
+        if (ds->getPort()) {
+            lstr.sprintf("port=%d ", ds->getPort());
+        }
+    }
+}
+
+#ifdef QDBI_METHOD_GET_CONNECT_TARGETS
+//! Returns the host that the loaded libpq uses for an entry without a host: its default UNIX socket directory, or
+//! \c localhost for a libpq without UNIX sockets
+/** libpq does not export its compiled-in default; it fills it in when it validates the connection options, so a
+    connection started with an invalid \c sslmode fails there, without any I/O, with the default host in place.  The
+    host and hostaddr are given (empty), so that neither PGHOST nor PGHOSTADDR applies, and a user and a password, so
+    that libpq neither looks up the user nor reads the password file.
+
+    @return 0 for success, -1 if an exception was raised
+*/
+static int pgsql_default_host(std::string& host, ExceptionSink* xsink) {
+    static std::mutex m;
+    static std::string cached;
+    std::lock_guard<std::mutex> lock(m);
+    if (cached.empty()) {
+        std::unique_ptr<PGconn, decltype(&PQfinish)> pc(PQconnectStart("host='' hostaddr='' port='1' "
+            "user='-' password='-' sslmode='invalid'"), PQfinish);
+        if (!pc) {
+            xsink->raiseException("DBI:PGSQL:ERROR", "the PostgreSQL client library could not allocate a "
+                "connection");
+            return -1;
+        }
+        const char* h = PQhost(pc.get());
+        if (!h || !*h) {
+            xsink->raiseException("NETWORK-ACCESS-DENIED", "cannot determine the default destination of the "
+                "PostgreSQL client library, so a connection without a host cannot be checked against the sandbox");
+            return -1;
+        }
+        cached = h;
+    }
+    host = cached;
+    return 0;
+}
+
+//! Parses a port as libpq does (leading and trailing white space allowed, 1 - 65535)
+/** @return the port, or 0 if it is invalid
+*/
+static int pgsql_parse_port(const std::string& value) {
+    const char* start = value.c_str();
+    char* end;
+    errno = 0;
+    long port = strtol(start, &end, 10);
+    if (end == start || errno) {
+        return 0;
+    }
+    while (isspace((unsigned char)*end)) {
+        ++end;
+    }
+    if (*end || port < 1 || port > 65535) {
+        return 0;
+    }
+    return (int)port;
+}
+
+//! Splits a comma-separated libpq list
+static std::vector<std::string> pgsql_split_list(const std::string& value) {
+    std::vector<std::string> rv;
+    size_t start = 0;
+    while (true) {
+        size_t end = value.find(',', start);
+        rv.emplace_back(value.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return rv;
+}
+
+//! A destination of a libpq connection
+struct PgsqlTarget {
+    //! the host name as libpq uses it (for TLS, .pgpass and GSSAPI), or the socket directory
+    std::string host;
+    //! the numeric address (hostaddr), if given
+    std::string addr;
+    //! the port
+    std::string port;
+    //! true for a UNIX socket
+    bool socket = false;
+};
+
+//! Determines the destinations that libpq connects to for a datasource, as libpq does (connectOptions2())
+/** The connection string of the datasource is completed with libpq's defaults (PGHOST, PGHOSTADDR, PGPORT and the
+    compiled-in values): every entry of a multi-host list is a destination; an entry with a \c hostaddr connects to
+    that address, a host that is a directory to the UNIX socket \c .s.PGSQL.<port> in it, an empty host to that socket
+    in libpq's default directory, and any other host by TCP.  A connection that uses a service file (\c service or
+    PGSERVICE) is refused, as the service file can name any destination, and so is an abstract UNIX socket (a host
+    starting with \c @), which no filesystem policy governs.
+
+    @return 0 for success, -1 if an exception was raised
+*/
+static int pgsql_get_targets(Datasource* ds, std::vector<PgsqlTarget>& targets, ExceptionSink* xsink) {
+    // the pinned connection lists every checked address of a host name as an entry of its own, which needs
+    // multi-host lists (libpq 10), and the timeout restart tells such entries apart by their address (PQhostaddr(),
+    // libpq 12)
+#if defined(HAVE_PQLIBVERSION) && defined(HAVE_PQHOSTADDR) && defined(HAVE_PQCONNINFO)
+    if (PQlibVersion() < 120000) {
+        xsink->raiseException("NETWORK-ACCESS-DENIED", "the PostgreSQL client library version %d cannot connect to "
+            "the addresses checked against the sandbox only; libpq 12 or later is required", PQlibVersion());
+        return -1;
+    }
+#else
+    xsink->raiseException("NETWORK-ACCESS-DENIED", "the pgsql driver was built with a PostgreSQL client library that "
+        "cannot connect to the addresses checked against the sandbox only; libpq 12 or later is required");
+    return -1;
+#endif
+    QoreString conninfo;
+    pgsql_conninfo(ds, conninfo);
+    char* err = nullptr;
+    std::unique_ptr<PQconninfoOption, decltype(&PQconninfoFree)> parsed(PQconninfoParse(conninfo.c_str(), &err),
+        PQconninfoFree);
+    if (!parsed) {
+        // the parse error can quote the connection string, which can contain the password
+        xsink->raiseException("DBI:PGSQL:ERROR", "invalid PostgreSQL connection parameters%s",
+            err ? "" : ": out of memory");
+        if (err) {
+            PQfreemem(err);
+        }
+        return -1;
+    }
+    std::unique_ptr<PQconninfoOption, decltype(&PQconninfoFree)> defaults(PQconndefaults(), PQconninfoFree);
+    if (!defaults) {
+        xsink->raiseException("DBI:PGSQL:ERROR", "could not allocate the PostgreSQL connection defaults");
+        return -1;
+    }
+    // the value of a keyword: given in the connection string (also if empty, which blocks the default, as in libpq),
+    // else libpq's default (an environment variable or the compiled-in value)
+    auto value = [&](const char* keyword) -> std::string {
+        for (const PQconninfoOption* p = parsed.get(); p->keyword; ++p) {
+            if (!strcmp(p->keyword, keyword) && p->val) {
+                return p->val;
+            }
+        }
+        for (const PQconninfoOption* p = defaults.get(); p->keyword; ++p) {
+            if (!strcmp(p->keyword, keyword)) {
+                if (p->val) {
+                    return p->val;
+                }
+                return p->compiled ? p->compiled : "";
+            }
+        }
+        return std::string();
+    };
+    // the compiled-in port, which libpq uses for an empty element of a port list
+    std::string default_port = "5432";
+    for (const PQconninfoOption* p = defaults.get(); p->keyword; ++p) {
+        if (!strcmp(p->keyword, "port")) {
+            if (p->compiled && *p->compiled) {
+                default_port = p->compiled;
+            }
+            break;
+        }
+    }
+
+    std::string service = value("service");
+    if (!service.empty()) {
+        xsink->raiseException("NETWORK-ACCESS-DENIED", "the PostgreSQL connection uses the service '%s', whose "
+            "destinations cannot be checked against the sandbox", service.c_str());
+        return -1;
+    }
+
+    std::string host_value = value("host");
+    std::string addr_value = value("hostaddr");
+    std::vector<std::string> hosts, addrs;
+    size_t count;
+    if (!addr_value.empty()) {
+        addrs = pgsql_split_list(addr_value);
+        count = addrs.size();
+        if (!host_value.empty()) {
+            hosts = pgsql_split_list(host_value);
+            if (hosts.size() != count) {
+                xsink->raiseException("DBI:PGSQL:ERROR", "could not match %d host names to %d hostaddr values",
+                    (int)hosts.size(), (int)count);
+                return -1;
+            }
+        }
+    } else {
+        hosts = pgsql_split_list(host_value);
+        count = hosts.size();
+    }
+    hosts.resize(count);
+    addrs.resize(count);
+    std::vector<std::string> ports = pgsql_split_list(value("port"));
+    if (ports.size() == 1) {
+        ports.resize(count, ports.front());
+    } else if (ports.size() != count) {
+        xsink->raiseException("DBI:PGSQL:ERROR", "could not match %d port numbers to %d hosts", (int)ports.size(),
+            (int)count);
+        return -1;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        if (qore_check_cancel(xsink, "listing the destinations of a PostgreSQL connection")) {
+            return -1;
+        }
+        PgsqlTarget t;
+        // the port as libpq parses it, which names the socket and is passed to the pinned connection
+        const std::string& port = ports[i].empty() ? default_port : ports[i];
+        int portnum = pgsql_parse_port(port);
+        if (!portnum) {
+            xsink->raiseException("DBI:PGSQL:ERROR", "invalid PostgreSQL port '%s'", port.c_str());
+            return -1;
+        }
+        t.port = std::to_string(portnum);
+        t.addr = addrs[i];
+        if (!t.addr.empty()) {
+            // libpq accepts only a numeric address
+            struct addrinfo hints = {};
+            hints.ai_flags = AI_NUMERICHOST;
+            hints.ai_socktype = SOCK_STREAM;
+            struct addrinfo* ai = nullptr;
+            if (getaddrinfo(t.addr.c_str(), nullptr, &hints, &ai)) {
+                xsink->raiseException("DBI:PGSQL:ERROR", "invalid PostgreSQL hostaddr '%s': not a numeric address",
+                    t.addr.c_str());
+                return -1;
+            }
+            freeaddrinfo(ai);
+        }
+        t.host = hosts[i];
+        if (t.addr.empty()) {
+            if (t.host.empty()) {
+                if (pgsql_default_host(t.host, xsink)) {
+                    return -1;
+                }
+                // a libpq without UNIX sockets (Windows) connects to localhost by TCP
+                t.socket = t.host[0] == '/';
+            } else if (t.host[0] == '@') {
+                xsink->raiseException("NETWORK-ACCESS-DENIED", "the PostgreSQL connection uses the abstract UNIX "
+                    "socket '%s', which cannot be checked against the sandbox", t.host.c_str());
+                return -1;
+            } else if (t.host[0] == '/') {
+                t.socket = true;
+            }
+        }
+        targets.push_back(std::move(t));
+    }
+    return 0;
+}
+
+//! Returns the destinations that libpq connects to for a datasource, for the sandbox (qore#5747)
+static QoreListNode* pgsql_get_connect_targets(Datasource* ds, ExceptionSink* xsink) {
+    std::vector<PgsqlTarget> targets;
+    if (pgsql_get_targets(ds, targets, xsink)) {
+        return nullptr;
+    }
+    ReferenceHolder<QoreListNode> rv(new QoreListNode(autoTypeInfo), xsink);
+    for (const PgsqlTarget& t : targets) {
+        ReferenceHolder<QoreHashNode> h(new QoreHashNode(autoTypeInfo), xsink);
+        if (t.socket) {
+            h->setKeyValue("socket", new QoreStringNode(t.host + "/.s.PGSQL." + t.port), xsink);
+        } else {
+            // a hostaddr is what libpq connects to
+            h->setKeyValue("host", new QoreStringNode(t.addr.empty() ? t.host : t.addr), xsink);
+            h->setKeyValue("port", atoi(t.port.c_str()), xsink);
+        }
+        rv->push(h.release(), xsink);
+    }
+    return rv.release();
+}
+
+//! Builds the host part of the connection string from the destinations that were checked against the sandbox
+/** Each checked address of a TCP destination becomes an entry with that address as \c hostaddr, and the host name of
+    the destination as \c host, so that libpq connects to exactly the checked addresses (also when it reconnects with
+    PQreset() or restarts after a timeout) while TLS, .pgpass and GSSAPI still use the host name; a UNIX socket entry
+    keeps its directory as \c host.  The destinations are determined again and must match the checked ones.
+
+    @note a host with several addresses becomes several entries, so it has more weight with
+    \c load_balance_hosts=random
+
+    @return 0 for success, -1 if an exception was raised
+*/
+static int pgsql_checked_conninfo(Datasource* ds, const QoreListNode* checked, QoreString& lstr,
+        ExceptionSink* xsink) {
+    std::vector<PgsqlTarget> targets;
+    if (pgsql_get_targets(ds, targets, xsink)) {
+        return -1;
+    }
+    if (targets.size() != checked->size()) {
+        xsink->raiseException("NETWORK-ACCESS-DENIED", "the destinations of the PostgreSQL connection changed after "
+            "they were checked against the sandbox");
+        return -1;
+    }
+    std::string host_list, addr_list, port_list;
+    bool first = true;
+    auto add = [&](const std::string& host, const std::string& addr, const std::string& port) {
+        if (!first) {
+            host_list += ',';
+            addr_list += ',';
+            port_list += ',';
+        }
+        first = false;
+        host_list += host;
+        addr_list += addr;
+        port_list += port;
+    };
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const PgsqlTarget& t = targets[i];
+        QoreValue cv = checked->retrieveEntry(i);
+        const QoreHashNode* c = cv.getType() == NT_HASH ? cv.get<const QoreHashNode>() : nullptr;
+        if (!c) {
+            xsink->raiseException("NETWORK-ACCESS-DENIED", "invalid checked destination of a PostgreSQL connection");
+            return -1;
+        }
+        if (t.socket) {
+            QoreValue path = c->getKeyValue("socket");
+            if (path.getType() != NT_STRING
+                || (t.host + "/.s.PGSQL." + t.port) != path.get<const QoreStringNode>()->c_str()) {
+                xsink->raiseException("NETWORK-ACCESS-DENIED", "the destinations of the PostgreSQL connection "
+                    "changed after they were checked against the sandbox");
+                return -1;
+            }
+            add(t.host, "", t.port);
+            continue;
+        }
+        QoreValue host = c->getKeyValue("host");
+        if (host.getType() != NT_STRING || (t.addr.empty() ? t.host : t.addr) != host.get<const QoreStringNode>()->c_str()
+            || c->getKeyValue("port").getAsBigInt() != atoi(t.port.c_str())) {
+            xsink->raiseException("NETWORK-ACCESS-DENIED", "the destinations of the PostgreSQL connection changed "
+                "after they were checked against the sandbox");
+            return -1;
+        }
+        // the host name for TLS, .pgpass and GSSAPI: an entry given only as an address keeps it empty, as in libpq
+        QoreValue av = c->getKeyValue("addresses");
+        const QoreListNode* addresses = av.getType() == NT_LIST ? av.get<const QoreListNode>() : nullptr;
+        if (!addresses || addresses->empty()) {
+            // an entry without an address would connect to the default socket, which was not checked
+            xsink->raiseException("NETWORK-ACCESS-DENIED", "a checked destination of a PostgreSQL connection has no "
+                "address");
+            return -1;
+        }
+        ConstListIterator ai(addresses);
+        while (ai.next()) {
+            add(t.host, ai.getValue().get<const QoreStringNode>()->c_str(), t.port);
+        }
+    }
+    pgsql_append_conninfo(lstr, "host", host_list.c_str());
+    pgsql_append_conninfo(lstr, "hostaddr", addr_list.c_str());
+    pgsql_append_conninfo(lstr, "port", port_list.c_str());
+    return 0;
+}
+#endif
+
 static int qore_pgsql_open(Datasource* ds, ExceptionSink* xsink) {
     printd(5, "qore_pgsql_open() datasource %08p for DB=%s\n", ds,
         ds->getDBName() ? ds->getDBName() : "unknown");
 
     // string for connection arguments
     QoreString lstr;
-    if (ds->getUsername())
-        lstr.sprintf("user='%s' ", ds->getUsername());
-
-    if (ds->getPassword())
-        lstr.sprintf("password='%s' ", ds->getPassword());
-
-    if (ds->getDBName())
-        lstr.sprintf("dbname='%s' ", ds->getDBName());
-
-    if (ds->getHostName())
-        lstr.sprintf("host='%s' ", ds->getHostName());
-
-    if (ds->getPort())
-        lstr.sprintf("port=%d ", ds->getPort());
+#ifdef QDBI_METHOD_GET_CONNECT_TARGETS
+    // a connection checked against a sandbox connects to the checked addresses only
+    if (const QoreListNode* checked = ds->getCheckedConnectTargets()) {
+        pgsql_conninfo(ds, lstr, false);
+        if (pgsql_checked_conninfo(ds, checked, lstr, xsink)) {
+            return -1;
+        }
+    } else {
+        pgsql_conninfo(ds, lstr);
+    }
+#else
+    pgsql_conninfo(ds, lstr);
+#endif
 
     if (ds->getDBEncoding()) {
         const QoreEncoding *enc = QorePGMapper::getQoreEncoding(ds->getDBEncoding());
@@ -386,6 +774,9 @@ static void pgsql_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) 
     // register database functions with DBI subsystem
     qore_dbi_method_list methods;
     methods.add(QDBI_METHOD_OPEN, qore_pgsql_open);
+#ifdef QDBI_METHOD_GET_CONNECT_TARGETS
+    methods.add(QDBI_METHOD_GET_CONNECT_TARGETS, pgsql_get_connect_targets);
+#endif
     methods.add(QDBI_METHOD_CLOSE, qore_pgsql_close);
     methods.add(QDBI_METHOD_SELECT, qore_pgsql_select);
     methods.add(QDBI_METHOD_SELECT_ROWS, qore_pgsql_select_rows);
