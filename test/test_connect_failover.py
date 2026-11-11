@@ -143,6 +143,171 @@ class Listener:
                 conn.close()
 
 
+STANDBY_QORE = QORE_HEADER + r'''%requires pgsql
+hash<auto> config = parse_datasource(ENV.QORE_DB_CONNSTR_PGSQL);
+config.host = "127.0.0.1";
+config.port = int(ENV.PGSQL_TEST_PROXY_PORT);
+config.options = {"connect-timeout": 10};
+Datasource ds(config);
+bool in_trans = boolean(ENV.PGSQL_TEST_IN_TRANSACTION);
+ds.setAutoCommit(!in_trans);
+hash<auto!> result = {};
+result.before = ds.selectRow("select pg_backend_pid() as pid").pid;
+# a read-only transaction: the server refuses the write with SQLSTATE 25006, as a standby does
+if (in_trans) {
+    ds.beginTransaction();
+    ds.exec("set transaction read only");
+} else {
+    ds.exec("set default_transaction_read_only = on");
+}
+try {
+    ds.exec("create temporary table standby_read_only_probe (id int)");
+    result.refused = False;
+} catch (hash<ExceptionInfo> ex) {
+    list<auto> errors = ();
+    for (*hash<ExceptionInfo> e = ex; e; e = e.next) {
+        errors += {"err": e.err, "alterr": e.arg.typeCode() == NT_HASH ? e.arg.alterr : NOTHING};
+    }
+    result.errors = errors;
+}
+if (in_trans) {
+    ds.rollback();
+}
+result.after = ds.selectRow("select pg_backend_pid() as pid").pid;
+result.read_only = ds.selectRow("select current_setting('default_transaction_read_only') as v").v;
+printf("STANDBY_RESULT %s\n", make_json(result));
+%endif
+'''
+
+
+class StandbyProxy:
+    """Relay connections to the real server; on the first, report the server as a hot standby.
+
+    PostgreSQL reports "in_hot_standby" in a ParameterStatus message at connection time; the proxy adds one, as a
+    standby sends it, just before the server's first ReadyForQuery.  Later connections are relayed unchanged.
+    """
+
+    def __init__(self, endpoint, inject=True):
+        self.endpoint = endpoint
+        self.inject = inject
+        self.socket = socket.socket()
+        try:
+            self.socket.bind(('127.0.0.1', 0))
+            self.socket.listen()
+        except BaseException:
+            self.socket.close()
+            raise
+        self.port = self.socket.getsockname()[1]
+        self.stopping = threading.Event()
+        self.connections = 0
+        self.sockets = []
+        self.threads = []
+        self.errors = []
+        self.thread = threading.Thread(target=self.serve)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def upstream(self):
+        host = self.endpoint.get('host')
+        if not host or host.startswith('/'):
+            path = os.path.join(host or '/var/run/postgresql', '.s.PGSQL.%d' % self.endpoint['port'])
+            conn = socket.socket(socket.AF_UNIX)
+            conn.connect(path)
+            return conn
+        return socket.create_connection((host, self.endpoint['port']), timeout=30)
+
+    @staticmethod
+    def receive(conn, size):
+        data = b''
+        while len(data) < size:
+            part = conn.recv(size - len(data))
+            if not part:
+                raise EOFError('peer closed')
+            data += part
+        return data
+
+    def serve(self):
+        try:
+            while True:
+                client, _ = self.socket.accept()
+                if self.stopping.is_set():
+                    client.close()
+                    return
+                self.connections += 1
+                server = self.upstream()
+                self.sockets += [client, server]
+                inject = self.inject and self.connections == 1
+                for target, args in ((self.toServer, (client, server)), (self.toClient, (server, client, inject))):
+                    thread = threading.Thread(target=target, args=args, daemon=True)
+                    self.threads.append(thread)
+                    thread.start()
+        except Exception as exc:
+            self.errors.append(exc)
+
+    def toServer(self, client, server):
+        try:
+            # the client's SSL or GSS request is answered here: the relay reads and writes plain messages
+            while True:
+                size, = struct.unpack('!I', self.receive(client, 4))
+                packet = self.receive(client, size - 4)
+                if size == 8 and packet in (struct.pack('!I', 80877103), struct.pack('!I', 80877104)):
+                    client.sendall(b'N')
+                    continue
+                server.sendall(struct.pack('!I', size) + packet)
+                break
+            while True:
+                data = client.recv(65536)
+                if not data:
+                    break
+                server.sendall(data)
+        except (OSError, EOFError):
+            pass
+        finally:
+            try:
+                server.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+    def toClient(self, server, client, inject):
+        try:
+            while True:
+                kind = self.receive(server, 1)
+                size, = struct.unpack('!I', self.receive(server, 4))
+                body = self.receive(server, size - 4)
+                if inject and kind == b'Z':
+                    status = b'in_hot_standby\0on\0'
+                    client.sendall(b'S' + struct.pack('!I', len(status) + 4) + status)
+                    inject = False
+                client.sendall(kind + struct.pack('!I', size) + body)
+        except (OSError, EOFError):
+            pass
+        finally:
+            try:
+                client.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+    def __exit__(self, *exc):
+        self.stopping.set()
+        try:
+            # a sentinel connection ends the blocking accept without sleeps or polling
+            with socket.create_connection(('127.0.0.1', self.port), timeout=5):
+                pass
+            self.thread.join(15)
+            if self.thread.is_alive():
+                raise AssertionError('proxy thread did not stop')
+            if self.errors:
+                raise AssertionError('proxy failed') from self.errors[0]
+        finally:
+            self.socket.close()
+            for conn in self.sockets:
+                conn.close()
+            for thread in self.threads:
+                thread.join(15)
+
+
 class ConnectFailoverTest(unittest.TestCase):
     def connect(self, ports, hosts=None, **overrides):
         env = os.environ.copy()
@@ -355,6 +520,56 @@ class ConnectFailoverTest(unittest.TestCase):
                                   PGTARGETSESSIONATTRS='read-only')
             self.assertEqual('DBI:PGSQL:ERROR', result.get('err'), result)
             self.assertIn('session is not read-only', result.get('desc', ''))
+
+
+    def runStandbyProbe(self, proxy, in_transaction=False):
+        env = os.environ.copy()
+        env.update(PGSQL_TEST_PROXY_PORT=str(proxy.port), PGSSLMODE='disable')
+        if in_transaction:
+            env['PGSQL_TEST_IN_TRANSACTION'] = '1'
+        else:
+            env.pop('PGSQL_TEST_IN_TRANSACTION', None)
+        command = shlex.split(env.get('QORE_TEST_COMMAND', 'qore'))
+        completed = subprocess.run(command + ['-b', '--enable-debug', '-l', 'pgsql', '-'],
+                                   input=STANDBY_QORE, text=True, env=env, capture_output=True, timeout=90)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual('', completed.stderr)
+        if completed.stdout.strip() == 'SKIP_JSON':
+            self.skipTest('requires the external Qore json module')
+        results = [line.removeprefix('STANDBY_RESULT ') for line in completed.stdout.splitlines()
+                   if line.startswith('STANDBY_RESULT ')]
+        self.assertEqual(1, len(results), completed.stdout)
+        return json.loads(results[0])
+
+    @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')
+    def test_standby_read_only_error_reconnects(self):
+        # a session that reached a demoted primary, now a hot standby, kept failing every write for as long as it
+        # lived; the write refused by a standby resets the connection, and the next statement runs on a new one
+        with StandbyProxy(self.databaseEndpoint()) as proxy:
+            result = self.runStandbyProbe(proxy)
+            self.assertEqual([{'err': 'DBI:PGSQL:ERROR', 'alterr': '25006'}], result.get('errors'), result)
+            self.assertEqual(2, proxy.connections, 'the refused write opened a new connection')
+            self.assertNotEqual(result['before'], result['after'], 'the old session is not reused')
+            self.assertEqual('off', result['read_only'], 'the next statement runs in a new session')
+
+    @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')
+    def test_standby_read_only_error_in_transaction_reports_the_lost_transaction(self):
+        with StandbyProxy(self.databaseEndpoint()) as proxy:
+            result = self.runStandbyProbe(proxy, True)
+            self.assertEqual([{'err': 'DBI:PGSQL:ERROR', 'alterr': '25006'},
+                              {'err': 'DBI:PGSQL:CONNECTION-ERROR', 'alterr': '25006'}], result.get('errors'), result)
+            self.assertEqual(2, proxy.connections)
+            self.assertNotEqual(result['before'], result['after'])
+
+    @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')
+    def test_read_only_session_on_a_primary_keeps_its_connection(self):
+        # the read-only transaction a session asked for on a primary is its own: the connection is kept
+        with StandbyProxy(self.databaseEndpoint(), inject=False) as proxy:
+            result = self.runStandbyProbe(proxy)
+            self.assertEqual([{'err': 'DBI:PGSQL:ERROR', 'alterr': '25006'}], result.get('errors'), result)
+            self.assertEqual(1, proxy.connections)
+            self.assertEqual(result['before'], result['after'])
+            self.assertEqual('on', result['read_only'])
 
 
 if __name__ == '__main__':
