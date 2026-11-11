@@ -1,0 +1,401 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# test-platform: macos - sandbox network and filesystem policy, libpq TCP and UNIX socket connections
+
+%modern
+%requires QUnit
+%requires FsUtil
+%prepend-module-path "${SCRIPT_DIR}/../build"
+%requires pgsql
+
+%exec-class PgsqlSandboxTest
+
+#! The pgsql driver reports the destinations of its connections to the sandbox (qore#5747)
+/** The driver's QDBI_METHOD_GET_CONNECT_TARGETS method completes the connection parameters with libpq's defaults
+    (PGHOST, PGHOSTADDR, PGPORT, the compiled-in port and socket directory) and reports every entry of a multi-host
+    list: a TCP host or address, or the UNIX socket in a directory; a service and an abstract socket are refused.  A
+    connection that was checked connects to the checked addresses only (hostaddr), also when it reconnects or skips
+    a host that timed out.
+
+    The refused cases never reach a server, and the sandboxes allow precisely: an allowed port or a denied socket path
+    that differs from the one the driver must report would let a wrong report through.  The cases that connect use
+    the database of QORE_DB_CONNSTR_PGSQL, and skip if it cannot be reached that way (by TCP or by the default UNIX
+    socket) without a sandbox.
+
+    Needs a Qore with the DBI sandbox check (DBI_CAP_LOCAL_ONLY); the test skips otherwise.
+*/
+class PgsqlSandboxTest inherits QUnit::Test {
+    public {
+
+        #! the port that libpq uses by default
+        const DefaultPort = 5432;
+    }
+
+    public {
+        #! the environment variables that libpq reads
+        const PgEnv = ("PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGPASSFILE",
+            "PGCHANNELBINDING", "PGSERVICE", "PGSERVICEFILE", "PGSYSCONFDIR", "PGOPTIONS", "PGAPPNAME", "PGSSLMODE",
+            "PGREQUIRESSL", "PGSSLNEGOTIATION", "PGSSLCOMPRESSION", "PGSSLCERT", "PGSSLKEY", "PGSSLCERTMODE",
+            "PGSSLROOTCERT", "PGSSLCRL", "PGSSLCRLDIR", "PGSSLSNI", "PGREQUIREPEER", "PGSSLMINPROTOCOLVERSION",
+            "PGSSLMAXPROTOCOLVERSION", "PGGSSENCMODE", "PGKRBSRVNAME", "PGGSSLIB", "PGGSSDELEGATION",
+            "PGCONNECT_TIMEOUT", "PGCLIENTENCODING", "PGTARGETSESSIONATTRS", "PGLOADBALANCEHOSTS", "PGMINPROTOCOLVERSION",
+            "PGMAXPROTOCOLVERSION", "PGDATESTYLE", "PGTZ", "PGGEQO", "PGLOCALEDIR");
+    }
+
+    private {
+        #! the libpq environment variables (PG*) when the test started; cleared in every case
+        hash<string, string> saved_env;
+    }
+
+    constructor() : QUnit::Test("PgsqlSandboxTest", "1.0", \ARGV) {
+        addTestCase("connection values cannot add libpq keywords", \testEscaping());
+        addTestCase("a denied TCP destination is refused", \testRefused());
+        addTestCase("every host of a multi-host list is checked", \testMultiHost());
+        addTestCase("a host from PGHOST is checked", \testPgHost());
+        addTestCase("an address from PGHOSTADDR is checked instead of the host name", \testPgHostAddr());
+        addTestCase("the port from PGPORT is checked", \testPgPort());
+        addTestCase("an empty port list element is libpq's default port", \testEmptyPortElement());
+        addTestCase("host names and hostaddr values must match", \testHostAddrMismatch());
+        addTestCase("a service is refused", \testService());
+        addTestCase("an abstract UNIX socket is refused", \testAbstractSocket());
+        addTestCase("a socket directory is checked against the filesystem policy", \testSocketDir());
+        addTestCase("the default UNIX socket is checked against the filesystem policy", \testDefaultSocket());
+        addTestCase("an allowed TCP connection is made to the checked address", \testAllowedTcp());
+        addTestCase("a reconnect stays on the checked address", \testReconnect());
+        addTestCase("a timed-out host is skipped within the checked addresses", \testTimeoutRestart());
+        set_return_value(main());
+    }
+
+    globalSetUp() {
+        foreach hash<auto> i in (ENV.pairIterator()) {
+            if (i.key =~ /^PG/) {
+                saved_env{i.key} = i.value;
+            }
+        }
+    }
+
+    #! clears every libpq environment variable
+    /** ENV is the environment when the program started, so the variables that libpq reads are cleared by name too
+    */
+    clearPgEnv() {
+        foreach string var in (PgEnv + (keys saved_env ?? ())) {
+            unsetenv(var);
+        }
+    }
+
+    setUp() {
+        if (!haveDbiSandboxCheck()) {
+            testSkip("this Qore does not check DBI connections against the sandbox");
+        }
+        clearPgEnv();
+    }
+
+    tearDown() {
+        clearPgEnv();
+        foreach hash<auto> i in (saved_env.pairIterator()) {
+            setenv(i.key, i.value);
+        }
+    }
+
+    #! returns True if Qore checks DBI connections against the sandbox (qore#5747): it has DBI_CAP_LOCAL_ONLY
+    static bool haveDbiSandboxCheck() {
+        Program p(PO_NEW_STYLE);
+        try {
+            p.parse("int sub f() { return DBI_CAP_LOCAL_ONLY; }", "check");
+            return True;
+        } catch (hash<ExceptionInfo> ex) {
+            return False;
+        }
+    }
+
+    #! returns a Program governed by the sandbox with functions that connect and query
+    static Program sandboxed(SandboxManager sm) {
+        Program p(PO_NEW_STYLE);
+        p.setSandboxManager(sm);
+        p.parse("
+auto sub query(hash<auto> c) {
+    Datasource ds(c);
+    ds.open();
+    on_exit ds.close();
+    return ds.selectRow(\"select inet_server_addr()::text as addr\").addr;
+}
+
+# reports the backend PID to 'pids', waits for 'go', then queries again on the same connection
+hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
+    Datasource ds(c);
+    ds.open();
+    on_exit ds.close();
+    hash<auto> row = ds.selectRow(\"select pg_catalog.pg_backend_pid() as pid\");
+    ds.commit();
+    pids.push(row.pid);
+    go.get();
+    row = ds.selectRow(\"select pg_catalog.pg_backend_pid() as pid, inet_server_addr()::text as addr\");
+    ds.commit();
+    return row;
+}", "pgsql-sandbox");
+        return p;
+    }
+
+    #! a sandbox that allows by default and denies TEST-NET-3 (RFC 5737), where no test database can be
+    static SandboxManager denyTestNet() {
+        SandboxManager sm();
+        sm.setNetworkDefaultPolicy(True);
+        sm.setFilesystemDefaultPolicy(True);
+        sm.addNetworkDeniedIPRange("203.0.113.0/24");
+        return sm;
+    }
+
+    #! a sandbox that allows only the given port
+    static SandboxManager onlyPort(int port) {
+        SandboxManager sm();
+        sm.setNetworkDefaultPolicy(True);
+        sm.setFilesystemDefaultPolicy(True);
+        sm.addNetworkAllowedPort(port);
+        return sm;
+    }
+
+    #! returns the error of a query in the sandboxed Program, or the server address it reports
+    static auto query(Program p, hash<auto> c) {
+        try {
+            return p.callFunction("query", c);
+        } catch (hash<ExceptionInfo> ex) {
+            return ex.err;
+        }
+    }
+
+    #! connection parameters that no server accepts, for the refused cases
+    static hash<auto> dummy(hash<auto> c = {}) {
+        # a connection timeout, in case a firewall drops the connection attempts
+        return {"type": "pgsql", "user": "u", "pass": "p", "db": "db", "options": {"connect-timeout": 2}} + c;
+    }
+
+    #! returns the connection parameters of the test database, or skips the case
+    hash<auto> params() {
+        if (!ENV.QORE_DB_CONNSTR_PGSQL) {
+            testSkip("set QORE_DB_CONNSTR_PGSQL to a PostgreSQL database");
+        }
+        return parse_datasource(ENV.QORE_DB_CONNSTR_PGSQL);
+    }
+
+    #! returns the parameters of a TCP connection to the test database and the address it reports, or skips the case
+    hash<auto> tcpParams() {
+        hash<auto> c = params();
+        if (!c.host || c.host =~ /^[\/@]/) {
+            testSkip("QORE_DB_CONNSTR_PGSQL does not give a TCP host");
+        }
+        try {
+            Datasource ds(c);
+            ds.open();
+            on_exit ds.close();
+            return {"c": c, "addr": ds.selectRow("select inet_server_addr()::text as addr").addr};
+        } catch (hash<ExceptionInfo> ex) {
+            testSkip(sprintf("the test database cannot be reached by TCP: %s: %s", ex.err, ex.desc));
+        }
+    }
+
+    testEscaping() {
+        # a quote in a value must not end it: here it would add a service keyword, which libpq would look up (and the
+        # sandbox would refuse)
+        hash<auto> c = dummy({"host": "127.0.0.1", "port": DefaultPort,
+            "pass": "p' service='qore-test-no-such-service"});
+        Datasource ds(c);
+        try {
+            ds.open();
+            ds.close();
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("DBI:PGSQL:ERROR", ex.err);
+            assertNRegex("qore-test-no-such-service", ex.desc, "the password is not parsed as a keyword");
+        }
+        # in a sandbox: checked as the plain TCP destination it is
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(denyTestNet()), c));
+    }
+
+    testRefused() {
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(denyTestNet()), dummy({"host": "203.0.113.1",
+            "port": DefaultPort})));
+        # not refused by the sandbox: the check passes and the connection fails (or succeeds) at the server
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(denyTestNet()), dummy({"host": "127.0.0.1",
+            "port": DefaultPort})));
+    }
+
+    testMultiHost() {
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(denyTestNet()), dummy({"host": "127.0.0.1,203.0.113.2"})));
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(denyTestNet()), dummy({"host": "203.0.113.2,127.0.0.1"})));
+    }
+
+    testPgHost() {
+        setenv("PGHOST", "203.0.113.1");
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(denyTestNet()), dummy()));
+        # a host given explicitly takes precedence over PGHOST
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(denyTestNet()), dummy({"host": "127.0.0.1",
+            "port": DefaultPort})));
+    }
+
+    testPgHostAddr() {
+        # libpq connects to the address and keeps the host name for TLS: the address is checked, not the name, which
+        # cannot be resolved
+        setenv("PGHOSTADDR", "203.0.113.1");
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(denyTestNet()), dummy({"host": "pg.invalid"})));
+        setenv("PGHOSTADDR", "127.0.0.1");
+        # the name is not resolved: the check passes, and libpq connects to the address
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(denyTestNet()), dummy({"host": "pg.invalid",
+            "port": DefaultPort})));
+    }
+
+    testPgPort() {
+        setenv("PGPORT", "6000");
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(onlyPort(DefaultPort)), dummy({"host": "127.0.0.1"})));
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(onlyPort(6000)), dummy({"host": "127.0.0.1"})));
+        # a port given explicitly takes precedence over PGPORT
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(onlyPort(DefaultPort)), dummy({"host": "127.0.0.1",
+            "port": DefaultPort})));
+    }
+
+    testEmptyPortElement() {
+        # an empty element is the compiled-in port, not the rest of the list or PGPORT
+        setenv("PGPORT", ",6000");
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(onlyPort(6000)), dummy({"host": "127.0.0.1,127.0.0.1"})));
+        setenv("PGPORT", sprintf("%d,", DefaultPort));
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(onlyPort(DefaultPort)),
+            dummy({"host": "127.0.0.1,127.0.0.1"})));
+    }
+
+    testHostAddrMismatch() {
+        setenv("PGHOSTADDR", "127.0.0.1");
+        # no network access: only the driver's own check can raise the libpq error
+        SandboxManager deny_all();
+        deny_all.setNetworkDefaultPolicy(False);
+        deny_all.setFilesystemDefaultPolicy(True);
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(deny_all), dummy({"host": "a.invalid,b.invalid"})));
+        # a hostaddr that is not numeric, which libpq refuses
+        setenv("PGHOSTADDR", "localhost");
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(deny_all), dummy({"host": "a.invalid"})));
+    }
+
+    testService() {
+        setenv("PGSERVICE", "qore-test-no-such-service");
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(denyTestNet()), dummy({"host": "127.0.0.1"})));
+    }
+
+    testAbstractSocket() {
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(denyTestNet()), dummy({"host": "@qore-test"})));
+    }
+
+    testSocketDir() {
+        TmpDir dir("pgsql-sandbox");
+        # only the socket the driver must report is denied
+        SandboxManager deny_socket = denyTestNet();
+        deny_socket.addFilesystemDeniedPath(dir.path + "/.s.PGSQL.6000");
+        hash<auto> c = dummy({"host": dir.path, "port": 6000});
+        assertEq("FILESYSTEM-ACCESS-DENIED", query(sandboxed(deny_socket), c));
+        # another socket in the directory is denied: the check passes and libpq finds no socket
+        SandboxManager deny_other = denyTestNet();
+        deny_other.addFilesystemDeniedPath(dir.path + "/.s.PGSQL.6001");
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(deny_other), c));
+    }
+
+    testDefaultSocket() {
+        # no host: the socket in libpq's default directory, which the filesystem policy decides; libpq names the socket
+        # in the error of a connection to a port where no server listens
+        setenv("PGPORT", "1");
+        *string path;
+        try {
+            Datasource ds(dummy());
+            ds.open();
+        } catch (hash<ExceptionInfo> ex) {
+            path = (ex.desc =~ x/socket "([^"]+)"/)[0];
+        }
+        if (!path) {
+            testSkip("libpq does not name the default socket in its connection error");
+        }
+        assertRegex("/\\.s\\.PGSQL\\.1$", path);
+        # only the socket the driver must report is denied
+        SandboxManager deny_socket = denyTestNet();
+        deny_socket.addFilesystemDeniedPath(path);
+        assertEq("FILESYSTEM-ACCESS-DENIED", query(sandboxed(deny_socket), dummy()));
+        SandboxManager deny_other = denyTestNet();
+        deny_other.addFilesystemDeniedPath(path + "0");
+        assertEq("DBI:PGSQL:ERROR", query(sandboxed(deny_other), dummy()));
+        # a port with white space names the same socket, as in libpq
+        setenv("PGPORT", " 1 ");
+        assertEq("FILESYSTEM-ACCESS-DENIED", query(sandboxed(deny_socket), dummy()));
+        unsetenv("PGPORT");
+
+        hash<auto> c = params() - ("host", "port");
+        try {
+            Datasource ds(c);
+            ds.open();
+            ds.close();
+        } catch (hash<ExceptionInfo> ex) {
+            testSkip(sprintf("the test database cannot be reached by the default UNIX socket: %s: %s", ex.err,
+                ex.desc));
+        }
+        # a UNIX socket connection reports no server address (SQL NULL)
+        assertEq(NULL, query(sandboxed(denyTestNet()), c), "connected by the UNIX socket");
+    }
+
+    testAllowedTcp() {
+        hash<auto> t = tcpParams();
+        assertEq(t.addr, query(sandboxed(denyTestNet()), t.c), "connected to the checked address");
+        # every address denied: refused before connecting
+        SandboxManager deny_all();
+        deny_all.setNetworkDefaultPolicy(False);
+        deny_all.setFilesystemDefaultPolicy(True);
+        assertEq("NETWORK-ACCESS-DENIED", query(sandboxed(deny_all), t.c));
+    }
+
+    testReconnect() {
+        hash<auto> t = tcpParams();
+        {
+            Datasource ds(t.c);
+            ds.open();
+            on_exit ds.close();
+            # pg_terminate_backend() with a timeout, which returns once the backend has exited
+            if (ds.getServerVersion() < 140000) {
+                testSkip("PostgreSQL 14 or later is needed to wait for a terminated backend");
+            }
+        }
+        Program p = sandboxed(denyTestNet());
+        Queue pids();
+        Queue go();
+        Queue result();
+        background sub () {
+            try {
+                result.push(p.callFunction("reconnect", t.c, pids, go));
+            } catch (hash<ExceptionInfo> ex) {
+                # unblocks the test thread if the first query failed
+                pids.push(-1);
+                result.push({"err": ex.err, "desc": ex.desc});
+            }
+        }();
+        int pid = pids.get();
+        # the sandboxed code continues whatever happens here
+        on_exit go.push(True);
+        if (pid > 0) {
+            Datasource admin(t.c);
+            on_exit admin.close();
+            # with a timeout, pg_terminate_backend() returns once the backend has exited
+            assertTrue(admin.selectRow("select pg_catalog.pg_terminate_backend(%v, 60000) as done", pid).done);
+            admin.commit();
+        }
+        go.push(True);
+        hash<auto> row = result.get();
+
+        assertEq(NOTHING, row.err, row.desc);
+        assertNeq(pid, row.pid, "the connection was reestablished");
+        assertEq(t.addr, row.addr, "on the checked address");
+    }
+
+    testTimeoutRestart() {
+        hash<auto> t = tcpParams();
+        # the first host (TEST-NET-1, RFC 5737) never answers: libpq gives up after connect-timeout and the driver
+        # restarts with the remaining, pinned entries; the timeout also covers the start of
+        # the session with the second host, so it is not short
+        hash<auto> c = t.c + {
+            "host": "192.0.2.1," + t.c.host,
+            "port": t.c.port ?? DefaultPort,
+            "options": (t.c.options ?? {}) + {"connect-timeout": 3},
+        };
+        assertEq(t.addr, query(sandboxed(denyTestNet()), c), "connected to the checked address of the second host");
+    }
+}

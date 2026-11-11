@@ -52,6 +52,30 @@ major_version * 10000 + minor_version * 100 + sub_version
     - @anchor pgsqlstoredprocs @subpage pgsqlstoredprocsguide
     - @anchor pgsqlreleasenotes @subpage pgsqlreleasenotesguide
 
+    @section pgsqlsandbox Sandboxing
+
+    In a %Qore version that checks DBI connections against the sandbox, a connection opened by code governed by a
+    sandbox is checked against its network and filesystem policy before it is opened.  The driver reports every
+    destination that libpq would connect to, completing the connection parameters with libpq's defaults as libpq does
+    (the \c PGHOST, \c PGHOSTADDR and \c PGPORT environment variables and the compiled-in port and socket directory):
+    - every entry of a multi-host list (\c "host1,host2"), with its port
+    - a host by TCP, or the address given with \c PGHOSTADDR instead of the host name
+    - a host that is a directory, or no host, as the UNIX socket <tt>.s.PGSQL.&lt;port&gt;</tt> in that directory or in libpq's
+      default socket directory, which the filesystem policy decides
+
+    A connection that uses a service (\c PGSERVICE) is refused with \c NETWORK-ACCESS-DENIED, as the service file can
+    name any destination, and so is an abstract UNIX socket (a host starting with \c "@"), which no filesystem policy
+    governs.
+
+    A connection that was checked connects to the addresses that were checked only: each address becomes an entry of
+    the connection with the address as libpq's \c hostaddr and the host name as \c host, so that a host name that
+    resolves to another address later (also when the driver reconnects or skips a host that timed out) cannot
+    redirect it, while TLS host name verification, \c .pgpass and GSSAPI still use the host name.  A host name with
+    several addresses therefore has more weight with \c load_balance_hosts=random.
+
+    Pinning the connection needs libpq 12 or later; with an older libpq, code governed by a sandbox that restricts
+    the network or the filesystem cannot open a connection.
+
     @section pgsqltrans Transaction Management
 
     When the Datasource is not in auto-commit mode, this driver automatically inserts \c "begin" statements at the start of each transaction to provide consistent transaction handling across all Qore DBI drivers; it's not necessary to do this manually.
