@@ -65,6 +65,10 @@ sub runStatement(Queue q, string connstr, int key, string sql) {
     */
     private hash<auto> interruptExecuting(string sql, int hold = 0) {
         SandboxManager sm();
+        # the manager is there for interrupts only: it allows every destination, so the connection is not
+        # checked against a network or filesystem policy (qore#5747)
+        sm.setNetworkDefaultPolicy(True);
+        sm.setFilesystemDefaultPolicy(True);
         Queue resultQueue();
         Program p(PO_NO_CHILD_PO_RESTRICTIONS);
         p.setSandboxManager(sm);
