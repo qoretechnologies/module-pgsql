@@ -50,6 +50,9 @@ static void pgsql_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink);
 static void pgsql_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, ExceptionSink& xsink);
 static void pgsql_module_delete();
 
+// the module's namespace; purged when the module is deleted (see QoreModuleInfo::ns)
+static QoreNamespace pgsql_ns("PGSQL");
+
 extern "C" DLLEXPORT void pgsql_qore_module_desc(QoreModuleInfo& mod_info) {
     mod_info.name = "pgsql";
     mod_info.version = QORE_MODULE_PACKAGE_VERSION;
@@ -61,11 +64,13 @@ extern "C" DLLEXPORT void pgsql_qore_module_desc(QoreModuleInfo& mod_info) {
     mod_info.init = pgsql_module_init;
     mod_info.ns_init = pgsql_module_ns_init;
     mod_info.del = pgsql_module_delete;
+#ifdef QORE_HAS_MODULE_NS_PURGE
+    // the namespace is purged when the module is deleted, before the types are freed (see QoreModuleInfo::ns)
+    mod_info.ns = &pgsql_ns;
+#endif
     mod_info.license = QL_MIT;
     mod_info.license_str = "MIT";
 }
-
-static QoreNamespace pgsql_ns("PGSQL");
 
 static int pgsql_caps = DBI_CAP_TRANSACTION_MANAGEMENT
    | DBI_CAP_CHARSET_SUPPORT
