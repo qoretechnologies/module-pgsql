@@ -492,7 +492,7 @@ class PgsqlTest inherits QUnit::Test {
 
         hash args = Args;
         # fix values where we know the return type is different
-        args.money_f = 400.56;
+        args.money_f = 400.56n;
         args.number_f = 7235634215.325n;
 
         args.interval_f = 6M + 3D + 9915s;
@@ -508,9 +508,6 @@ class PgsqlTest inherits QUnit::Test {
         # remove values where we know they won't match
         # timestamptz is converted to GMT by the server
         delete q.timestamptz_f;
-
-        # issue 269:
-        delete q.money_f;
 
         # compare each value
         map assertEq(args.($1.key), $1.value), q.pairIterator();

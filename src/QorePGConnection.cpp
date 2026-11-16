@@ -1264,10 +1264,98 @@ static QoreValue qpg_data_numeric(char* data, int type, int len, QorePGConnectio
     return nd->toString();
 }
 
+// returns the decimal value of a money value: an int8 in the smallest unit of the session's currency
+static QoreNumberNode* qpg_money_to_number(int64 v, int frac_digits) {
+    // the magnitude as unsigned, so that the most negative value can be negated
+    uint64_t m = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    char digits[32];
+    int len = snprintf(digits, sizeof digits, "%llu", (unsigned long long)m);
+    std::string str;
+    if (v < 0) {
+        str += '-';
+    }
+    if (len <= frac_digits) {
+        str += "0.";
+        str.append(frac_digits - len, '0');
+        str += digits;
+    } else {
+        str.append(digits, len - frac_digits);
+        if (frac_digits) {
+            str += '.';
+            str.append(digits + len - frac_digits);
+        }
+    }
+    return new QoreNumberNode(str.c_str());
+}
+
+// converts a plain decimal string (an optional '-', digits and an optional '.' with digits) to the int8 value of
+// money with the given number of fractional digits, rounding half away from zero as the server does; returns 0 for
+// OK, -1 if the value is out of the range of money or not in this format
+static int qpg_decimal_to_money(const char* str, int frac_digits, int64& rv) {
+    const char* p = str;
+    bool neg = false;
+    if (*p == '-') {
+        neg = true;
+        ++p;
+    }
+    const uint64_t limit = neg ? (uint64_t)1 << 63 : ((uint64_t)1 << 63) - 1;
+    uint64_t m = 0;
+    auto add_digit = [&m, limit](int d) -> int {
+        if (m > (limit - d) / 10) {
+            return -1;
+        }
+        m = m * 10 + d;
+        return 0;
+    };
+    if (!isdigit(*p)) {
+        return -1;
+    }
+    for (; isdigit(*p); ++p) {
+        if (add_digit(*p - '0')) {
+            return -1;
+        }
+    }
+    if (*p == '.') {
+        ++p;
+    }
+    // the fractional digits that the currency has, then the next one to round
+    for (int i = 0; i < frac_digits; ++i) {
+        int d = 0;
+        if (isdigit(*p)) {
+            d = *p - '0';
+            ++p;
+        }
+        if (add_digit(d)) {
+            return -1;
+        }
+    }
+    if (isdigit(*p) && *p >= '5') {
+        if (m == limit) {
+            return -1;
+        }
+        ++m;
+    }
+    while (isdigit(*p)) {
+        ++p;
+    }
+    if (*p) {
+        return -1;
+    }
+    rv = neg ? (int64)((uint64_t)0 - m) : (int64)m;
+    return 0;
+}
+
+// returns true if a value bound as money is a number bound in the binary format of money; strings are sent as text
+// for the server to read in the session's lc_monetary format (ex: "$1,000.50")
+static bool qpg_is_money_number(QoreValue v) {
+    qore_type_t t = v.getType();
+    return t == NT_INT || t == NT_FLOAT || t == NT_NUMBER;
+}
+
 static QoreValue qpg_data_cash(char* data, int type, int len, QorePGConnection* conn, const QoreEncoding* enc) {
-    double f = (double)ntohl(*((uint32_t*)data)) / 100.0;
-    //printd(5, "qpg_data_cash() f: %g\n", f);
-    return f;
+    // an int8 in the smallest unit of the currency of the session's lc_monetary setting
+    int64 v = MSBi8(*((uint64_t*)data));
+    return qpg_money_to_number(v, conn->getMoneyFracDigits());
 }
 
 static QoreValue qpg_data_macaddr(char* data, int type, int len, QorePGConnection* conn, const QoreEncoding* enc) {
@@ -1722,6 +1810,7 @@ void QorePgsqlStatement::reset() {
         PQclear(res);
         res = 0;
     }
+    money_frac_digits_read = false;
 
     if (allocated) {
         parambuf_list_t::iterator i = parambuf_list.begin();
@@ -2932,6 +3021,8 @@ int QorePgsqlStatement::add(QoreValue v_arg, ExceptionSink *xsink) {
                     pb->str = vec_str->giveBuffer();
                     delete vec_str;
                     paramValues[nParams] = pb->str;
+                } else if (base_oid == CASHOID && qpg_is_money_number(val)) {
+                    return addMoney(val, pb, xsink);
                 } else {
                     paramTypes[nParams] = base_oid;
                     int len;
@@ -2964,6 +3055,8 @@ int QorePgsqlStatement::add(QoreValue v_arg, ExceptionSink *xsink) {
         if (t.isNullOrNothing()) {
             paramTypes[nParams] = 0;
             paramValues[nParams] = 0;
+        } else if (type == CASHOID && qpg_is_money_number(t)) {
+            return addMoney(t, pb, xsink);
         } else {
             paramTypes[nParams] = type;
 
@@ -3497,6 +3590,114 @@ bool QorePgsqlStatement::checkIntegerDateTimes(ExceptionSink *xsink) {
     return val == 0;
 }
 
+int QorePGConnection::readMoneyFracDigits(ExceptionSink* xsink) {
+    // the int8 to money cast multiplies by 10 to the power of the number of fractional digits of the currency
+    PGresult* tres = PQexecParams(pc, "select 1::int8::money", 0, nullptr, nullptr, nullptr, nullptr, 1);
+    if (!tres) {
+        xsink->raiseException("DBI:PGSQL:ERROR", "%s: error determining the fractional digits of money values: "
+            "PQexecParams() returned NULL", getServerDesc());
+        return -1;
+    }
+    ON_BLOCK_EXIT(PQclear, tres);
+
+    if (PQresultStatus(tres) != PGRES_TUPLES_OK) {
+        QoreString desc(PQresultErrorMessage(tres));
+        desc.chomp();
+        xsink->raiseException("DBI:PGSQL:ERROR", "%s: error determining the fractional digits of money values: %s",
+            getServerDesc(), desc.c_str());
+        return -1;
+    }
+
+    int64 scale = 0;
+    if (PQntuples(tres) == 1 && PQnfields(tres) == 1 && PQgetlength(tres, 0, 0) == (int)sizeof(int64)) {
+        scale = MSBi8(*((uint64_t*)PQgetvalue(tres, 0, 0)));
+    }
+    int digits = 0;
+    while (scale > 1 && !(scale % 10)) {
+        scale /= 10;
+        ++digits;
+    }
+    if (scale != 1) {
+        xsink->raiseException("DBI:PGSQL:ERROR", "%s: error determining the fractional digits of money values: "
+            "unexpected result of the query", getServerDesc());
+        return -1;
+    }
+    money_frac_digits = digits;
+    return 0;
+}
+
+int QorePgsqlStatement::checkResultMoney(ExceptionSink* xsink) {
+    if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        return 0;
+    }
+    for (int i = 0, e = PQnfields(res); i < e; ++i) {
+        Oid oid = PQftype(res, i);
+        if (oid == CASHOID || oid == QPGT_MONEYARRAYOID) {
+            return conn->readMoneyFracDigits(xsink);
+        }
+    }
+    return 0;
+}
+
+int QorePgsqlStatement::addMoney(QoreValue v, parambuf* pb, ExceptionSink* xsink) {
+    // bound as an int8 in the smallest unit of the session's currency, the binary format of money, so that the value
+    // does not depend on how the session's lc_monetary setting formats numbers
+    // nothing is bound until the value is converted, so that reset() frees nothing for this parameter after an error
+    paramTypes[nParams] = 0;
+    paramValues[nParams] = 0;
+    QoreString str;
+    switch (v.getType()) {
+        case NT_INT:
+            str.sprintf("%lld", (long long)v.getAsBigInt());
+            break;
+        case NT_FLOAT: {
+            double f = v.getAsFloat();
+            if (!std::isfinite(f)) {
+                xsink->raiseException("DBI:PGSQL:BIND-ERROR", "cannot bind %g as a money value", f);
+                ++nParams;
+                return -1;
+            }
+            SimpleRefHolder<QoreNumberNode> n(new QoreNumberNode(f));
+            n->getStringRepresentation(str);
+            break;
+        }
+        default: {
+            assert(v.getType() == NT_NUMBER);
+            const QoreNumberNode* n = v.get<const QoreNumberNode>();
+            n->getStringRepresentation(str);
+            if (!n->ordinary()) {
+                xsink->raiseException("DBI:PGSQL:BIND-ERROR", "cannot bind %s as a money value", str.c_str());
+                ++nParams;
+                return -1;
+            }
+            break;
+        }
+    }
+
+    if (!money_frac_digits_read) {
+        if (conn->readMoneyFracDigits(xsink)) {
+            ++nParams;
+            return -1;
+        }
+        money_frac_digits_read = true;
+    }
+
+    int64 m;
+    if (qpg_decimal_to_money(str.c_str(), conn->getMoneyFracDigits(), m)) {
+        xsink->raiseException("DBI:PGSQL:BIND-ERROR", "value %s is out of the range of money values with %d "
+            "fractional digits", str.c_str(), conn->getMoneyFracDigits());
+        ++nParams;
+        return -1;
+    }
+    paramTypes[nParams] = CASHOID;
+    pb->assign(m);
+    paramValues[nParams] = (char*)&pb->i8;
+    paramLengths[nParams] = sizeof(int64);
+    paramFormats[nParams] = 1;
+    ++nParams;
+    return 0;
+}
+
 int QorePgsqlStatement::execIntern(const char* sql, ExceptionSink* xsink) {
     assert(!res);
     //printd(5, "QorePgsqlStatement::execIntern() this: %p sql: %s nParams: %d\n", this, sql, nParams);
@@ -3515,7 +3716,10 @@ int QorePgsqlStatement::execIntern(const char* sql, ExceptionSink* xsink) {
     //printd(5, "QorePgsqlStatement::execIntern() rc: %d\n", rc);
     if (rc == PGRES_COMMAND_OK || rc == PGRES_TUPLES_OK) {
         // a transaction that set the declared zone may have just ended
-        return conn->checkSessionTimeZone(xsink);
+        if (conn->checkSessionTimeZone(xsink)) {
+            return -1;
+        }
+        return checkResultMoney(xsink);
     }
 
     bool lost_connection = false;
@@ -3572,6 +3776,9 @@ int QorePgsqlStatement::execIntern(const char* sql, ExceptionSink* xsink) {
     int result = conn->checkClearResult(lost_connection, res, xsink);
     // a failed statement can also end a transaction that set the declared zone (ex: a failed commit)
     if (PQstatus(conn->get()) == CONNECTION_OK && conn->checkSessionTimeZone(xsink)) {
+        return -1;
+    }
+    if (!result && checkResultMoney(xsink)) {
         return -1;
     }
     return result;

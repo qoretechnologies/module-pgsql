@@ -1,0 +1,120 @@
+#!/usr/bin/env qore
+# Copyright 2026 Qore Technologies, s.r.o.
+%modern
+%requires QUnit
+%prepend-module-path "${SCRIPT_DIR}/../build"
+%requires pgsql
+%exec-class PgsqlMoneyTest
+
+# money values are int8 values in the smallest unit of the currency of the session's lc_monetary setting; they are
+# read as numbers and bound with PG_TYPE_CASH in that format, whatever the locale formats numbers like (issue #269)
+class PgsqlMoneyTest inherits Test {
+    constructor() : Test("PostgreSQL money values", "1.0", \ARGV) {
+        addTestCase("money values are read as numbers", \readTest());
+        addTestCase("money arrays are read as lists of numbers", \arrayTest());
+        addTestCase("values bound as money", \bindTest());
+        addTestCase("values bound as money are stored and compared", \tableTest());
+        addTestCase("binding money does not depend on the locale's number format", \localeTest());
+        set_return_value(main());
+    }
+
+    private Datasource connection() {
+        if (!ENV.QORE_DB_CONNSTR_PGSQL) {
+            testSkip("set QORE_DB_CONNSTR_PGSQL to a disposable PostgreSQL database");
+        }
+        return new Datasource(ENV.QORE_DB_CONNSTR_PGSQL);
+    }
+
+    readTest() {
+        Datasource ds = connection();
+        on_exit ds.rollback();
+        hash<auto> row = ds.selectRow("select 12.34::money as pos, (-1234567.89)::money as neg, 0::money as zero, "
+            "0.01::money as cent, (-0.01)::money as negcent, '$1,000.50'::money as text, "
+            "'92233720368547758.07'::money as max, '-92233720368547758.08'::money as min, "
+            "null::money as null_value");
+        assertEq(12.34n, row.pos);
+        assertEq(-1234567.89n, row.neg);
+        assertEq(0n, row.zero);
+        assertEq(0.01n, row.cent);
+        assertEq(-0.01n, row.negcent);
+        assertEq(1000.5n, row.text);
+        assertEq(92233720368547758.07n, row.max);
+        assertEq(-92233720368547758.08n, row.min);
+        assertEq(NULL, row.null_value);
+        assertEq("number", row.pos.type());
+    }
+
+    arrayTest() {
+        Datasource ds = connection();
+        on_exit ds.rollback();
+        assertEq((1.5n, -2n, 0.01n, NULL), ds.selectRow("select array[1.5::money, (-2)::money, 0.01::money, null] "
+            "as a").a);
+    }
+
+    bindTest() {
+        Datasource ds = connection();
+        on_exit ds.rollback();
+        # the value is bound with the type money, so the server returns it unchanged
+        foreach hash<auto> i in ((
+                {"value": 12.34, "expected": 12.34n},
+                {"value": 12.34n, "expected": 12.34n},
+                {"value": -1234567.89n, "expected": -1234567.89n},
+                {"value": 99, "expected": 99n},
+                {"value": 0, "expected": 0n},
+                {"value": "56.78", "expected": 56.78n},
+                {"value": 92233720368547758.07n, "expected": 92233720368547758.07n},
+                {"value": -92233720368547758.08n, "expected": -92233720368547758.08n},
+                # rounded half away from zero to the currency's fractional digits, as the server rounds
+                {"value": 0.005n, "expected": 0.01n},
+                {"value": -0.005n, "expected": -0.01n},
+                {"value": 1.234n, "expected": 1.23n},
+            )) {
+            hash<auto> row = ds.selectRow("select %v as m, pg_typeof(%v)::text as t",
+                pgsql_bind(PG_TYPE_CASH, i.value), pgsql_bind(PG_TYPE_CASH, i.value));
+            assertEq(i.expected, row.m, sprintf("%y", i.value));
+            assertEq("money", row.t, sprintf("%y", i.value));
+        }
+        # the type can also be given by name
+        assertEq(7.5n, ds.selectRow("select %v as m", {"^pgtype^": "money", "^value^": 7.5}).m);
+        assertEq(NULL, ds.selectRow("select %v::money as m", pgsql_bind(PG_TYPE_CASH, NULL)).m);
+
+        assertThrows("DBI:PGSQL:BIND-ERROR", "out of the range", \ds.selectRow(), ("select %v as m",
+            pgsql_bind(PG_TYPE_CASH, 92233720368547758.08n)));
+        assertThrows("DBI:PGSQL:BIND-ERROR", "out of the range", \ds.selectRow(), ("select %v as m",
+            pgsql_bind(PG_TYPE_CASH, 1e30)));
+        assertThrows("DBI:PGSQL:BIND-ERROR", \ds.selectRow(), ("select %v as m", pgsql_bind(PG_TYPE_CASH, @nan@n)));
+        assertThrows("DBI:PGSQL:BIND-ERROR", \ds.selectRow(), ("select %v as m", pgsql_bind(PG_TYPE_CASH, @inf@)));
+    }
+
+    tableTest() {
+        Datasource ds = connection();
+        on_exit ds.rollback();
+        ds.exec("create temporary table money_values (id int, m money) on commit drop");
+        list<auto> values = (12.34n, -1234567.89n, 92233720368547758.07n, 0.01n, NULL);
+        foreach auto v in (values) {
+            ds.exec("insert into money_values values (%v, %v)", $#, pgsql_bind(PG_TYPE_CASH, v));
+        }
+        # a number is also converted to money by the server when it is assigned to a money column
+        ds.exec("insert into money_values values (%v, %v)", 5, 3.5n);
+        assertEq(values + 3.5n, ds.select("select m from money_values order by id").m);
+        assertEq((0, 2), ds.select("select id from money_values where m > %v order by id",
+            pgsql_bind(PG_TYPE_CASH, 10)).id);
+        assertEq(-1234552.04n, ds.selectRow("select sum(m) as s from money_values where id <> 2").s);
+    }
+
+    localeTest() {
+        Datasource ds = connection();
+        # a locale that writes numbers with a decimal comma: the server reads "12.34" as 1234 in it; it is set for the
+        # session, as a select does not start a transaction
+        try {
+            ds.selectRow("select set_config('lc_monetary', 'en_DK.utf8', false)");
+        } catch (hash<ExceptionInfo> ex) {
+            testSkip("the server has no en_DK.utf8 locale: " + ex.desc);
+        }
+        on_exit ds.close();
+        assertEq(1234n, ds.selectRow("select '12.34'::money as m").m);
+        assertEq(12.34n, ds.selectRow("select %v as m", pgsql_bind(PG_TYPE_CASH, 12.34)).m);
+        assertEq(12.34n, ds.selectRow("select %v as m", pgsql_bind(PG_TYPE_CASH, 12.34n)).m);
+        assertEq(-1234.5n, ds.selectRow("select (-1234.5)::money as m").m);
+    }
+}

@@ -62,6 +62,29 @@
     - \c INTERVAL: a relative date/time value as an ISO 8601 duration
     - any other type: the value in ISO 8601 format with its UTC offset
 
+    @section pgsql_money Money Values
+
+    A \c MONEY value is an integer amount of the smallest unit of the currency of the session's \c lc_monetary
+    setting (ex: cents); the number of fractional digits of that currency is read from the server for every statement
+    that binds or returns money values, as the session can change \c lc_monetary at any time.  Money values are
+    returned as exact \c number values.
+
+    PostgreSQL converts \c NUMERIC, \c INTEGER and \c INT8 values, but not \c FLOAT8 or \c TEXT values, to
+    \c MONEY when they are assigned to a column, so a \c number value can be bound to a money column, but a
+    \c float or \c string value cannot (neither can an \c int value small enough to be bound as \c INT2).  To bind a
+    value as money, also in an expression (ex: <tt>where amount > %v</tt>), use
+    <tt>pgsql_bind(PG_TYPE_CASH, value)</tt> (or the type name \c "money"):
+    - an \c int, \c float or \c number value is bound in the binary format of money, rounded half away from zero to
+      the fractional digits of the currency, whatever \c lc_monetary formats numbers like; a value outside of the
+      range of money raises \c DBI:PGSQL:BIND-ERROR
+    - a \c string value is sent as text, which the server reads in the format of \c lc_monetary (ex:
+      <tt>"$1,000.50"</tt>, or <tt>"1.000,50"</tt> in a locale with a decimal comma)
+
+    @code{.py}
+# binds 400.56 as money, so it can be compared to a money column
+*list<hash<auto>> rows = db.selectRows("select * from orders where amount > %v", pgsql_bind(PG_TYPE_CASH, 400.56));
+    @endcode
+
     @section pgsql_to_qore PostgreSQL to Qore Type Mappings
     |!PostgreSQL Type|!Qore Type|!Notes
     |\c BOOLEAN|\c bool|direct conversion
@@ -89,7 +112,7 @@
     |<tt>TIME WITH TIMEZONE</tt>|\c Date (absolute)|Microseconds and time zone information are maintained. Note that the date portion is set to January 1, 1970, the beginning of the 64-bit qore epoch.
     |\c TINTERVAL|\c string|string format is given in PostgreSQL tinterval format ([\c "YYYY-MM-DD hh:mm:ss" \c "YYYY-MM-DD hh:mm:ss"])
     |\c NUMERIC|\c string|To avoid loss of precision, the information is converted to a string
-    |\c CASH|\c Float|direct conversion
+    |\c CASH|\c Number|the exact amount in the currency of the session; see @ref pgsql_money
     |\c MACADDR|\c string|format: <tt>xx:xx:xx:xx:xx:xx</tt>
     |\c INET|\c string|ipv4: <tt>n.n.n.n/net</tt>, ipv6: <tt>x:x:x:x:x:x:x:x/net</tt>
     |\c CIDR|\c string|ipv4: <tt>n.../net</tt>, ipv6: <tt>x:...::/net</tt>
