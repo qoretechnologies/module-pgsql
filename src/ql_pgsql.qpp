@@ -431,6 +431,7 @@ db.exec("insert into t (d) values (%v)", pgsql_bind(PG_TYPE_DATE, 2040-01-05T00:
 my float $amount = 400.56;
 my *hash $results = $db.select("select * from table where amount > %v", pgsql_bind(PG_TYPE_CASH, $amount));
     @endcode
+    See @ref pgsql_money for how money values are bound and returned.
 
     @throw PGSQL-BIND-ERROR if the type argument is 0 this exception is raised
  */

@@ -549,6 +549,10 @@ protected:
     Oid sparsevec_oid = 0;
     Oid sparsevec_array_oid = 0;
 
+    // the number of fractional digits of money values in the session (lc_monetary), as last read by
+    // readMoneyFracDigits()
+    int money_frac_digits = 2;
+
 #ifdef QDBI_METHOD_BULK_LOAD_BEGIN
     //! active driver-native COPY FROM STDIN protocol state
     QorePGBulkCopyState* bulk_copy = nullptr;
@@ -733,6 +737,20 @@ public:
         return applySessionTimeZone(session_tz, xsink);
     }
 
+    //! Reads the number of fractional digits of money values in the session from the server
+    /** A money value is an integer in the smallest unit of the currency of the session's \c lc_monetary setting,
+        which can change at any time; the number of fractional digits is read for every statement that binds or
+        returns money values
+
+        @return 0 for success, -1 for error (exception raised)
+    */
+    DLLLOCAL int readMoneyFracDigits(ExceptionSink* xsink);
+
+    //! Returns the number of fractional digits of money values in the session, as last read
+    DLLLOCAL int getMoneyFracDigits() const {
+        return money_frac_digits;
+    }
+
     DLLLOCAL QoreValue getOption(const char* opt) {
         if (!strcasecmp(opt, DBI_OPT_NUMBER_OPT))
             return numeric_support == OPT_NUM_OPTIMAL;
@@ -909,11 +927,17 @@ protected:
     const QoreEncoding *enc;
     //! expected array size for array bind validation; -1 = not yet set
     int array_size;
+    //! true if the number of fractional digits of money values was read for the values bound
+    bool money_frac_digits_read = false;
 
     DLLLOCAL QoreValue getValue(int row, int col, ExceptionSink *xsink);
     // returns 0 for OK, -1 for error
     DLLLOCAL int parse(QoreString *str, const QoreListNode *args, ExceptionSink *xsink);
     DLLLOCAL int add(QoreValue v, ExceptionSink *xsink);
+    //! binds an int, float or number value as a money value; returns 0 for OK, -1 for error
+    DLLLOCAL int addMoney(QoreValue v, parambuf* pb, ExceptionSink* xsink);
+    //! reads the number of fractional digits of money values if the result has money columns
+    DLLLOCAL int checkResultMoney(ExceptionSink* xsink);
     DLLLOCAL QoreListNode* getArray(int type, qore_pg_data_func_t func, char *&array_data, int current, int ndim, int dim[]);
     DLLLOCAL void reset();
     DLLLOCAL QoreHashNode* getSingleRowIntern(ExceptionSink* xsink, int row = 0);
