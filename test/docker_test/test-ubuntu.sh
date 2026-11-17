@@ -8,6 +8,7 @@ ENV_FILE=/tmp/env.sh
 . ${ENV_FILE}
 
 . test/docker_test/postgres_lib.sh
+sh test/docker_test/test_postgres_wait.sh
 setup_postgres_on_host
 
 # setup MODULE_SRC_DIR env var
