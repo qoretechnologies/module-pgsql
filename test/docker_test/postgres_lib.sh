@@ -37,6 +37,31 @@ start_postgres() {
     psql -Upostgres -h ${QORE_DB_HOST} -c "create extension if not exists vector;" ${QORE_DB_NAME} 2>/dev/null || true
 }
 
+# Waits until the PostgreSQL server of the "services" container accepts a connection from the postgres user; fails with a
+# message when it does not within PG_READY_ATTEMPTS attempts (default 120), PG_READY_INTERVAL seconds apart (default 1).
+# It probes with psql, which the job needs anyway, with the arguments of the job (PSQL_ARGS).
+wait_for_postgres_host() {
+    attempts=${PG_READY_ATTEMPTS:-120}
+    interval=${PG_READY_INTERVAL:-1}
+    printf "waiting for the PostgreSQL server: "
+    i=1
+    while true; do
+        # PSQL_ARGS is unquoted on purpose: it holds the option and its value
+        if psql -Upostgres ${PSQL_ARGS} -tAc "select 1" postgres >/dev/null 2>&1; then
+            echo ": ready after ${i} attempt(s)"
+            return 0
+        fi
+        if [ "${i}" -ge "${attempts}" ]; then
+            echo
+            echo "The PostgreSQL server (${PSQL_ARGS:-local socket}) did not accept connections after ${attempts} attempts; aborting the build." >&2
+            return 1
+        fi
+        printf .
+        sleep "${interval}"
+        i=$((i + 1))
+    done
+}
+
 setup_postgres_on_host() {
     # add env vars to environment file and load it
     # NOTE: must convert to lower case only, or the psql commands below will fail
@@ -59,6 +84,10 @@ setup_postgres_on_host() {
     fi
 
     . /tmp/env.sh
+
+    # the GitLab "services" keyword starts the container but does not wait for the server inside it to finish
+    # initializing, so the first connection can be refused
+    wait_for_postgres_host
 
     # create user for test; CREATEROLE lets SqlUtil's PgsqlBoundedTransaction.qtest create (and drop) the role its
     # row-security case needs
