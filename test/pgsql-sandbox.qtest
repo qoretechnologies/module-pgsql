@@ -177,7 +177,12 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
         return parse_datasource(ENV.QORE_DB_CONNSTR_PGSQL);
     }
 
-    #! returns the parameters of a TCP connection to the test database and the address it reports, or skips the case
+    #! returns the parameters of a TCP connection to the test database, or skips the case
+    /** \c addrs are the addresses of the host as the server reports them (\c inet_server_addr()): those that Qore's
+        resolver gives for it, which the sandbox checks and the driver connects to; the address of a connection
+        outside the sandbox, which libpq resolves itself, can be another of them (ex: \c 127.0.0.1 where the sandboxed
+        connection uses \c ::1)
+    */
     hash<auto> tcpParams() {
         hash<auto> c = params();
         if (!c.host || c.host =~ /^[\/@]/) {
@@ -187,10 +192,28 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
             Datasource ds(c);
             ds.open();
             on_exit ds.close();
-            return {"c": c, "addr": ds.selectRow("select inet_server_addr()::text as addr").addr};
+            ds.selectRow("select 1");
         } catch (hash<ExceptionInfo> ex) {
             testSkip(sprintf("the test database cannot be reached by TCP: %s: %s", ex.err, ex.desc));
         }
+        return {"c": c, "addrs": serverAddresses(c.host)};
+    }
+
+    #! returns the addresses of a host as PostgreSQL reports them (\c inet_server_addr()::text)
+    static list<string> serverAddresses(string host) {
+        list<string> rv = ();
+        foreach hash<auto> ai in (getaddrinfo(host, NOTHING, AF_UNSPEC)) {
+            string addr = sprintf("%s/%d", ai.address, ai.family == AF_INET6 ? 128 : 32);
+            if (!inlist(addr, rv)) {
+                rv += addr;
+            }
+        }
+        return rv;
+    }
+
+    #! checks that a connection made in the sandbox reports one of the checked addresses
+    private checkAddress(hash<auto> t, auto addr, string desc) {
+        assertTrue(inlist(addr, t.addrs), sprintf("%s: %y is one of %y", desc, addr, t.addrs));
     }
 
     testEscaping() {
@@ -336,7 +359,7 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
 
     testAllowedTcp() {
         hash<auto> t = tcpParams();
-        assertEq(t.addr, query(sandboxed(denyTestNet()), t.c), "connected to the checked address");
+        checkAddress(t, query(sandboxed(denyTestNet()), t.c), "connected to a checked address");
         # every address denied: refused before connecting
         SandboxManager deny_all();
         deny_all.setNetworkDefaultPolicy(False);
@@ -383,7 +406,7 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
 
         assertEq(NOTHING, row.err, row.desc);
         assertNeq(pid, row.pid, "the connection was reestablished");
-        assertEq(t.addr, row.addr, "on the checked address");
+        checkAddress(t, row.addr, "on a checked address");
     }
 
     testTimeoutRestart() {
@@ -396,6 +419,6 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
             "port": t.c.port ?? DefaultPort,
             "options": (t.c.options ?? {}) + {"connect-timeout": 3},
         };
-        assertEq(t.addr, query(sandboxed(denyTestNet()), c), "connected to the checked address of the second host");
+        checkAddress(t, query(sandboxed(denyTestNet()), c), "connected to a checked address of the second host");
     }
 }
