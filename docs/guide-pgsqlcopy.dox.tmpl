@@ -4,6 +4,9 @@
 
     @tableofcontents
 
+    COPY and native bulk loading serialize absolute date/time values in the datasource time zone.
+    Relative date/time values use PostgreSQL interval syntax so their duration is preserved.
+
     The pgsql driver supports PostgreSQL's \c COPY protocol for maximum-throughput bulk inserts. When
     a <tt>COPY ... FROM STDIN</tt> SQL statement is executed with a hash-of-lists argument, the driver
     streams data directly to the server using PostgreSQL's escaped text COPY format, bypassing SQL
