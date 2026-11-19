@@ -426,7 +426,7 @@ db.exec("insert into t (d) values (%v)", pgsql_bind(PG_TYPE_DATE, 2040-01-05T00:
     @returns The hash returned by the function encodes the desired PostgreSQL type for the bind and the value for binding in the \c "^pgtype^" and \c "^value^" keys
 
     @par Example:
-    @code
+    @code{.py}
 # we use pgsql_bind() to bind a money type by value, otherwise the server would raise an error
 my float $amount = 400.56;
 my *hash $results = $db.select("select * from table where amount > %v", pgsql_bind(PG_TYPE_CASH, $amount));
@@ -469,7 +469,7 @@ hash pgsql_bind_array(*softlist<auto> value) [flags=CONSTANT,NAMED_ARGS] {
     @returns The hash returned by the function encodes the UUID type for binding
 
     @par Example:
-    @code
+    @code{.py}
 # bind a UUID value
 db.exec("insert into users (id) values (%v)", pgsql_bind_uuid("550e8400-e29b-41d4-a716-446655440000"));
     @endcode
@@ -492,7 +492,7 @@ hash pgsql_bind_uuid(string value) [flags=RET_VALUE_ONLY,NAMED_ARGS] {
     @returns The hash returned by the function encodes the vector type for binding
 
     @par Example:
-    @code
+    @code{.py}
 # bind a vector value
 db.exec("insert into items (embedding) values (%v)", pgsql_bind_vector((1.5, 2.3, 4.1)));
     @endcode
@@ -521,7 +521,7 @@ namespace Qore::Pgsql;
 /** Returns columns: table_name, table_type
 
     @par Example:
-    @code
+    @code{.py}
 list<auto> tables = db.selectRows(PGSQL_SQL_LIST_TABLES);
     @endcode
 
@@ -533,7 +533,7 @@ const PGSQL_SQL_LIST_TABLES = "SELECT table_name, table_type FROM information_sc
 /** Returns columns: schema_name, schema_owner
 
     @par Example:
-    @code
+    @code{.py}
 list<auto> schemas = db.selectRows(PGSQL_SQL_LIST_SCHEMAS);
     @endcode
 
@@ -545,7 +545,7 @@ const PGSQL_SQL_LIST_SCHEMAS = "SELECT schema_name, schema_owner FROM informatio
 /** Returns columns: column_name, data_type, is_nullable, column_default, character_maximum_length, numeric_precision
 
     @par Example:
-    @code
+    @code{.py}
 list<auto> columns = db.selectRows(PGSQL_SQL_TABLE_COLUMNS, "my_table");
     @endcode
 
@@ -557,7 +557,7 @@ const PGSQL_SQL_TABLE_COLUMNS = "SELECT column_name, data_type, is_nullable, col
 /** Returns columns: index_name, is_unique, is_primary, column_names
 
     @par Example:
-    @code
+    @code{.py}
 list<auto> indexes = db.selectRows(PGSQL_SQL_TABLE_INDEXES, "my_table");
     @endcode
 
@@ -569,7 +569,7 @@ const PGSQL_SQL_TABLE_INDEXES = "SELECT i.relname as index_name, ix.indisunique 
 /** Returns columns: constraint_name, column_name, foreign_table, foreign_column
 
     @par Example:
-    @code
+    @code{.py}
 list<auto> fks = db.selectRows(PGSQL_SQL_TABLE_FOREIGN_KEYS, "my_table");
     @endcode
 
@@ -581,7 +581,7 @@ const PGSQL_SQL_TABLE_FOREIGN_KEYS = "SELECT tc.constraint_name, kcu.column_name
 /** Returns columns: function_name, result_type, argument_types
 
     @par Example:
-    @code
+    @code{.py}
 list<auto> functions = db.selectRows(PGSQL_SQL_LIST_FUNCTIONS);
     @endcode
 
@@ -593,7 +593,7 @@ const PGSQL_SQL_LIST_FUNCTIONS = "SELECT p.proname as function_name, pg_get_func
 /** Returns columns: sequence_name, data_type, start_value, increment
 
     @par Example:
-    @code
+    @code{.py}
 list<auto> sequences = db.selectRows(PGSQL_SQL_LIST_SEQUENCES);
     @endcode
 
@@ -605,7 +605,7 @@ const PGSQL_SQL_LIST_SEQUENCES = "SELECT sequence_name, data_type, start_value, 
 /** Returns columns: view_name, view_definition
 
     @par Example:
-    @code
+    @code{.py}
 list<auto> views = db.selectRows(PGSQL_SQL_LIST_VIEWS);
     @endcode
 

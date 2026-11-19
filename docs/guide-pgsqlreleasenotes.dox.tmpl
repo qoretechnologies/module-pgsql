@@ -33,11 +33,6 @@
       a silent first host no longer prevents a connection to a healthy later host. Each selected
       endpoint receives its own timeout; authentication failures still stop immediately, and
       cancellation remains effective while connecting. This also applies when reopening a connection
-    - COPY and native bulk loading now write absolute date/time values in the datasource's time zone,
-      consistently with ordinary untyped inserts. Previously plain timestamps and dates could be shifted when
-      the input value used another zone. Existing rows are not changed by this fix
-    - COPY and native bulk loading now preserve relative date/time values using PostgreSQL interval syntax;
-      previously a duration could be silently stored with an incorrect value
     - empty PostgreSQL arrays are returned as empty lists reliably; reading an empty array
       could previously cause excessive memory use or terminate the process
     - a connection attempt ends as soon as its thread is cancelled or its %Qore \c Program is interrupted
@@ -111,8 +106,6 @@
     - public API documentation includes generated QPP declarations and binding links
     - CMake uninstall honors staging paths and preserves unrelated files and directories
 
-    - fixed pgvector test setup on fresh databases by installing the extension before
-      opening the connection that discovers and tests its types
     - added the settable \c "tcp-user-timeout" connection option (libpq \c tcp_user_timeout), enabled
       by default with a 30-second limit; a query in flight when the server's host disappears without
       closing the connection now fails once its data has gone unacknowledged for that long, instead
@@ -144,10 +137,8 @@
     - native COPY validates row-block shapes, checks cooperative cancellation while rendering large
       blocks, aborts cleanly on observer refusal or overrun, and drains the server result on every end
       path so the connection can be reused after rollback
-    - the raw <tt>COPY ... FROM STDIN</tt> SQL detection path remains supported unchanged
     - removed the autotools build; the module is now built with CMake only
 
-    @section pgsql34 pgsql Driver Version 3.4
     - \c COPY \c FROM \c STDIN operations now report bounded stream boundaries to a datasource
       mutation observer when the driver is built against %Qore 3.0 or later; declared and consumed
       byte counts are reported without the payload ever being buffered, and a consumer can reject a
@@ -181,7 +172,6 @@
       for PostgreSQL \c boolean, integer, floating-point, string-like, bounded \c numeric(p,s), date/time, and
       interval result columns where the linked %Qore runtime supports the corresponding dense logical column type
 
-    @section pgsql33 pgsql Driver Version 3.3
     - added \c DBI_CAP_HAS_ARRAY_BIND support: Qore lists are automatically encoded as PostgreSQL
       binary arrays, enabling efficient bulk DML via the \c BulkSqlUtil module and PostgreSQL's
       \c unnest() function; supported types: \c int, \c float, \c number, \c string, \c bool,
@@ -189,35 +179,31 @@
     - added \c COPY \c FROM \c STDIN protocol support for maximum-throughput bulk inserts: when a
       \c COPY statement is executed with a hash-of-lists argument, the driver streams data directly
       to PostgreSQL using the binary COPY protocol
-    - added array bind size validation: all list parameters bound in the same statement must have
-      the same number of elements
     - added native UUID type support with pgsql_bind_uuid() function
     - added schema introspection SQL constants (PGSQL_SQL_LIST_TABLES, PGSQL_SQL_TABLE_COLUMNS, etc.)
     - added additional character encoding mappings (Windows code pages 1250-1258)
     - fixed a memory leak when \c add() failed mid-parse (e.g., array size mismatch): extra
       \c parambuf entries beyond \c nParams were not freed in \c reset()
     - fixed a bug retrieving negative \c INT2 and \c INT4 values (were returned as unsigned)
-    - fixed a bug in interval array binding where hours were incorrectly calculated
-    - fixed a bug in boolean array binding where \c htonl() was incorrectly applied
     - fixed server description format in error messages
 
     @section pgsql321 pgsql Driver Version 3.2.1
     - fixed support for PostgreSQL 18
-      (<a href="https://github.com/qorelanguage/qore/issues/5002">issue 5002</a>)
+      (<a href="https://github.com/qoretechnologies/qore/issues/5002">issue 5002</a>)
 
     @section pgsql32 pgsql Driver Version 3.2
     - added support for the \c XML, \c JSON, and \c JSONB types
-      (<a href="https://github.com/qorelanguage/qore/issues/4448">issue 4448</a>)
+      (<a href="https://github.com/qoretechnologies/qore/issues/4448">issue 4448</a>)
 
     @section pgsql311 pgsql Driver Version 3.1.1
     - fixed a bug handling server disconnections and automatic reconnections
-      (<a href="https://github.com/qorelanguage/qore/issues/4368">issue 4368</a>)
+      (<a href="https://github.com/qoretechnologies/qore/issues/4368">issue 4368</a>)
 
     @section pgsql31 pgsql Driver Version 3.1
     - fixed a bug retrieving numeric data from multiple SQLStatement::fetchRow() calls
-      (<a href="https://github.com/qorelanguage/qore/issues/4249">issue 4249</a>)
+      (<a href="https://github.com/qoretechnologies/qore/issues/4249">issue 4249</a>)
     - fixed a bug where a spurious transaction was raised with a reconnect when not in a tranaction
-      (<a href="https://github.com/qorelanguage/qore/issues/3977">issue 3977</a>)
+      (<a href="https://github.com/qoretechnologies/qore/issues/3977">issue 3977</a>)
 
     @section pgsql30 pgsql Driver Version 3.0
     <b>New Features and Bug Fixes</b>
@@ -225,19 +211,19 @@
     - exceptions thrown by PostgreSQL module contains arg values with alterr and alterr_diag strings as described in
       <a href="https://www.postgresql.org/docs/current/static/errcodes-appendix.html">PostgreSQL error codes</a>
     - fixed a crash reiterating SQL statements with no bind arguments
-      (<a href="https://github.com/qorelanguage/qore/issues/3627">issue 3627</a>)
+      (<a href="https://github.com/qoretechnologies/qore/issues/3627">issue 3627</a>)
 
     @section pgsql242 pgsql Driver Version 2.4.2
     <b>Bug Fixes</b>
     - fixed a bug retrieving \c DATE column values after the year 2038
-      (<a href="https://github.com/qorelanguage/qore/issues/2986">issue 2986</a>)
+      (<a href="https://github.com/qoretechnologies/qore/issues/2986">issue 2986</a>)
 
     @section pgsql241 pgsql Driver Version 2.4.1
     <b>New Features and Bug Fixes</b>
-    - updated SQLStatement::fetchColumns() to return an empty hash when no data is available (<a href="https://github.com/qorelanguage/qore/issues/1241">issue 1241</a>)
-    - fixed a formatting bug in an error message (<a href="https://github.com/qorelanguage/qore/issues/2018">issue 2018</a>)
-    - fixed selecting numeric values between 0 and 1 (<a href="https://github.com/qorelanguage/qore/issues/2149">issue 2149</a>)
-    - fixed a bug where \c DBI-SELECT-ROW-ERROR exceptions were being raised as \c PGSQL-SELECT-ROW-ERROR exceptions (<a href="https://github.com/qorelanguage/qore/issues/2542">issue 2542</a>)
+    - updated SQLStatement::fetchColumns() to return an empty hash when no data is available (<a href="https://github.com/qoretechnologies/qore/issues/1241">issue 1241</a>)
+    - fixed a formatting bug in an error message (<a href="https://github.com/qoretechnologies/qore/issues/2018">issue 2018</a>)
+    - fixed selecting numeric values between 0 and 1 (<a href="https://github.com/qoretechnologies/qore/issues/2149">issue 2149</a>)
+    - fixed a bug where \c DBI-SELECT-ROW-ERROR exceptions were being raised as \c PGSQL-SELECT-ROW-ERROR exceptions (<a href="https://github.com/qoretechnologies/qore/issues/2542">issue 2542</a>)
 
     @section pgsql24 pgsql Driver Version 2.4
 
@@ -250,9 +236,9 @@
     - changed the minimum required Qore version to 0.8.12 to support the test script wth QUnit
     - fixed a bug where interval values retrieved from the DB were justified to hours and minutes
     - fixed a bug where \c CHAR values were returned with an invalid internal string size
-    - fixed a bug where arbitrary-precision numeric values bound to numeric columns were bound with an incorrect scale value causing the digits behind the decimal place to be lost (<a href="https://github.com/qorelanguage/qore/issues/386">issue 386</a>)
+    - fixed a bug where arbitrary-precision numeric values bound to numeric columns were bound with an incorrect scale value causing the digits behind the decimal place to be lost (<a href="https://github.com/qoretechnologies/qore/issues/386">issue 386</a>)
     - fixed a bug where SQLStatement::describe() was failing even though result set information was available
-    - fixed a bug where duplicate column names in result sets caused memory leaks (and they were not renamed; <a href="https://github.com/qorelanguage/qore/issues/831">issue 831</a>)
+    - fixed a bug where duplicate column names in result sets caused memory leaks (and they were not renamed; <a href="https://github.com/qoretechnologies/qore/issues/831">issue 831</a>)
 
     @section pgsql23 pgsql Driver Version 2.3
 
