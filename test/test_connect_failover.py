@@ -11,6 +11,7 @@ import ctypes.util
 import errno
 import json
 import os
+import re
 import shlex
 import socket
 import struct
@@ -21,6 +22,16 @@ import time
 import tempfile
 import unittest
 from pathlib import Path
+
+
+def error_codes(text):
+    """The exception codes in the output of a child: the rest of it can hold the connection string."""
+    return re.findall(r'^([A-Z][A-Z0-9_]*(?:[:-][A-Z0-9_-]+)+): ', text, re.M)
+
+
+def without_desc(result):
+    """A result to show in a failed assertion: the description of an error can hold the connection string."""
+    return {key: value for key, value in result.items() if key != 'desc'}
 
 
 QORE_HEADER = r'''%modern
@@ -321,18 +332,18 @@ class ConnectFailoverTest(unittest.TestCase):
         command = shlex.split(env.get('QORE_TEST_COMMAND', 'qore'))
         completed = subprocess.run(command + ['-b', '--enable-debug', '-l', 'pgsql', '-'],
                                    input=QORE, text=True, env=env, capture_output=True, timeout=90)
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual('', completed.stderr)
+        self.assertEqual(0, completed.returncode, error_codes(completed.stderr))
+        self.assertEqual(0, len(completed.stderr), error_codes(completed.stderr))
         if completed.stdout.strip() == 'SKIP_JSON':
             self.skipTest('requires the external Qore json module')
         results = [line.removeprefix('CONNECT_RESULT ') for line in completed.stdout.splitlines()
                    if line.startswith('CONNECT_RESULT ')]
-        self.assertEqual(1, len(results), completed.stdout)
+        self.assertEqual(1, len(results), error_codes(completed.stdout))
         return json.loads(results[0])
 
     def assertRejected(self, result):
-        self.assertEqual('DBI:PGSQL:ERROR', result.get('err'), result)
-        self.assertIn('fixture authentication refused', result.get('desc', ''))
+        self.assertEqual('DBI:PGSQL:ERROR', result.get('err'), without_desc(result))
+        self.assertTrue('fixture authentication refused' in result.get('desc', ''), 'fixture authentication refused')
 
     def test_timeout_then_reachable_host(self):
         with Listener() as silent, Listener(reject=True) as target:
@@ -358,7 +369,7 @@ class ConnectFailoverTest(unittest.TestCase):
             start = time.monotonic()
             result = self.connect([first.port, second.port])
             self.assertEqual('DBI:PGSQL:ERROR', result.get('err'))
-            self.assertIn('timeout expired', result.get('desc', ''))
+            self.assertTrue('timeout expired' in result.get('desc', ''), 'timeout expired')
             self.assertGreaterEqual(time.monotonic() - start, 2)
             self.assertEqual(1, len(first.connections))
             self.assertEqual(1, len(second.connections))
@@ -472,7 +483,7 @@ class ConnectFailoverTest(unittest.TestCase):
         with Listener() as silent:
             result = self.connect([silent.port], '127.0.0.1,127.0.0.1', PGHOSTADDR='127.0.0.1')
             self.assertEqual('DBI:PGSQL:ERROR', result.get('err'))
-            self.assertIn('could not match', result.get('desc', ''))
+            self.assertTrue('could not match' in result.get('desc', ''), 'could not match')
             self.assertEqual(0, len(silent.connections))
 
     def databaseEndpoint(self):
@@ -481,7 +492,7 @@ class ConnectFailoverTest(unittest.TestCase):
                'printf("%s\\n",make_json({"host":c.host,"port":c.port ?? 5432}));\n%endif\n'
         result = subprocess.run(['qore', '-b', '--enable-debug', '-'], input=code, text=True,
                                 capture_output=True, check=True, timeout=15)
-        self.assertEqual('', result.stderr)
+        self.assertEqual(0, len(result.stderr), error_codes(result.stderr))
         if result.stdout.strip() == 'SKIP_JSON':
             self.skipTest('requires the external Qore json module')
         return json.loads(result.stdout)
@@ -492,7 +503,7 @@ class ConnectFailoverTest(unittest.TestCase):
         with Listener() as silent:
             result = self.connect([silent.port, endpoint['port']], '127.0.0.1,' + endpoint['host'],
                                   PGSQL_TEST_REOPEN='1')
-            self.assertEqual({'answer': 42}, result)
+            self.assertEqual({'answer': 42}, without_desc(result))
             self.assertEqual(2, len(silent.connections))
 
     @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')
@@ -502,7 +513,7 @@ class ConnectFailoverTest(unittest.TestCase):
             name = "failover's \\ application"
             result = self.connect([silent.port, endpoint['port']], '127.0.0.1,' + endpoint['host'],
                                   PGAPPNAME=name, PGSQL_TEST_APPNAME='1')
-            self.assertEqual({'application_name': name}, result)
+            self.assertEqual({'application_name': name}, without_desc(result))
 
     @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')
     def test_prefer_standby_falls_back_to_primary_after_timeout(self):
@@ -510,7 +521,7 @@ class ConnectFailoverTest(unittest.TestCase):
         with Listener() as silent:
             result = self.connect([silent.port, endpoint['port']], '127.0.0.1,' + endpoint['host'],
                                   PGTARGETSESSIONATTRS='prefer-standby')
-            self.assertEqual({'answer': 42}, result)
+            self.assertEqual({'answer': 42}, without_desc(result))
 
     @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')
     def test_target_session_attributes_survive_failover(self):
@@ -518,8 +529,8 @@ class ConnectFailoverTest(unittest.TestCase):
         with Listener() as silent:
             result = self.connect([silent.port, endpoint['port']], '127.0.0.1,' + endpoint['host'],
                                   PGTARGETSESSIONATTRS='read-only')
-            self.assertEqual('DBI:PGSQL:ERROR', result.get('err'), result)
-            self.assertIn('session is not read-only', result.get('desc', ''))
+            self.assertEqual('DBI:PGSQL:ERROR', result.get('err'), without_desc(result))
+            self.assertTrue('session is not read-only' in result.get('desc', ''), 'session is not read-only')
 
 
     def runStandbyProbe(self, proxy, in_transaction=False):
@@ -532,13 +543,13 @@ class ConnectFailoverTest(unittest.TestCase):
         command = shlex.split(env.get('QORE_TEST_COMMAND', 'qore'))
         completed = subprocess.run(command + ['-b', '--enable-debug', '-l', 'pgsql', '-'],
                                    input=STANDBY_QORE, text=True, env=env, capture_output=True, timeout=90)
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual('', completed.stderr)
+        self.assertEqual(0, completed.returncode, error_codes(completed.stderr))
+        self.assertEqual(0, len(completed.stderr), error_codes(completed.stderr))
         if completed.stdout.strip() == 'SKIP_JSON':
             self.skipTest('requires the external Qore json module')
         results = [line.removeprefix('STANDBY_RESULT ') for line in completed.stdout.splitlines()
                    if line.startswith('STANDBY_RESULT ')]
-        self.assertEqual(1, len(results), completed.stdout)
+        self.assertEqual(1, len(results), error_codes(completed.stdout))
         return json.loads(results[0])
 
     @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')

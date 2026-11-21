@@ -88,7 +88,7 @@ public class PgsqlNativeBulkLoadTest inherits QUnit::Test {
             ds.setAutoCommit(False);
             ds.open();
         } catch (hash<ExceptionInfo> ex) {
-            testSkip("no PostgreSQL connection: " + ex.err + ": " + ex.desc);
+            testSkip("no PostgreSQL connection: " + ex.err);
         }
         ds.execRaw(sprintf("drop table if exists %s", TableName));
         ds.execRaw(sprintf("create table %s (int_col integer, text_col varchar(%d) not null)",

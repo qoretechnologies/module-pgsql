@@ -109,7 +109,7 @@ class PgsqlMoneyTest inherits Test {
         try {
             ds.selectRow("select set_config('lc_monetary', 'en_DK.utf8', false)");
         } catch (hash<ExceptionInfo> ex) {
-            testSkip("the server has no en_DK.utf8 locale: " + ex.desc);
+            testSkip("the server has no en_DK.utf8 locale: " + ex.err);
         }
         on_exit ds.close();
         assertEq(1234n, ds.selectRow("select '12.34'::money as m").m);
