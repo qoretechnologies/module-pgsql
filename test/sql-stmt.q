@@ -168,7 +168,7 @@ sub test3(SQLStatement $stmt) {
         test_value(True, False, "first negative select");
     }
     catch ($ex) {
-        info("%s: %s", $ex.err, $ex.desc);
+        info("%s", $ex.err);
         test_value(True, True, "first negative select");
     }
     try {
@@ -179,7 +179,7 @@ sub test3(SQLStatement $stmt) {
         test_value(True, False, "second negative select");
     }
     catch ($ex) {
-        info("%s: %s", $ex.err, $ex.desc);
+        info("%s", $ex.err);
         test_value(True, True, "second negative select");
     }
     info("rollback done");

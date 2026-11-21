@@ -50,7 +50,7 @@ sub runStatement(Queue q, string connstr, int key, string sql) {
         ds.exec(sql);
         q.push({'cancelled': False});
     } catch (hash<ExceptionInfo> ex) {
-        q.push({'cancelled': True, 'err': ex.err, 'desc': ex.desc});
+        q.push({'cancelled': True, 'err': ex.err});
     }
 }
 ";

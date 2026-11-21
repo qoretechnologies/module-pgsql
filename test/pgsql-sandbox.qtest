@@ -194,7 +194,7 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
             on_exit ds.close();
             ds.selectRow("select 1");
         } catch (hash<ExceptionInfo> ex) {
-            testSkip(sprintf("the test database cannot be reached by TCP: %s: %s", ex.err, ex.desc));
+            testSkip("the test database cannot be reached by TCP: " + ex.err);
         }
         return {"c": c, "addrs": serverAddresses(c.host)};
     }
@@ -227,7 +227,7 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
             ds.close();
         } catch (hash<ExceptionInfo> ex) {
             assertEq("DBI:PGSQL:ERROR", ex.err);
-            assertNRegex("qore-test-no-such-service", ex.desc, "the password is not parsed as a keyword");
+            assertFalse(ex.desc =~ /qore-test-no-such-service/, "the password is not parsed as a keyword");
         }
         # in a sandbox: checked as the plain TCP destination it is
         assertEq("DBI:PGSQL:ERROR", query(sandboxed(denyTestNet()), c));
@@ -350,8 +350,7 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
             ds.open();
             ds.close();
         } catch (hash<ExceptionInfo> ex) {
-            testSkip(sprintf("the test database cannot be reached by the default UNIX socket: %s: %s", ex.err,
-                ex.desc));
+            testSkip("the test database cannot be reached by the default UNIX socket: " + ex.err);
         }
         # a UNIX socket connection reports no server address (SQL NULL)
         assertEq(NULL, query(sandboxed(denyTestNet()), c), "connected by the UNIX socket");
@@ -388,7 +387,7 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
             } catch (hash<ExceptionInfo> ex) {
                 # unblocks the test thread if the first query failed
                 pids.push(-1);
-                result.push({"err": ex.err, "desc": ex.desc});
+                result.push({"err": ex.err});
             }
         }();
         int pid = pids.get();
@@ -404,7 +403,7 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
         go.push(True);
         hash<auto> row = result.get();
 
-        assertEq(NOTHING, row.err, row.desc);
+        assertEq(NOTHING, row.err, "the reconnect raised no exception");
         assertNeq(pid, row.pid, "the connection was reestablished");
         checkAddress(t, row.addr, "on a checked address");
     }

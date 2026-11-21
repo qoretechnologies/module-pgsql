@@ -74,7 +74,7 @@ class PgsqlMutationObserverTest inherits QUnit::Test {
             }
             db.open();
         } catch (hash<ExceptionInfo> ex) {
-            testSkip("no PostgreSQL connection: " + ex.err + ": " + ex.desc);
+            testSkip("no PostgreSQL connection: " + ex.err);
         }
         db.execRaw(sprintf("drop table if exists %s", TableName));
         db.execRaw(sprintf("create table %s (int_col integer, text_col varchar(%d))", TableName, TextWidth));

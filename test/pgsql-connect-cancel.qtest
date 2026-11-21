@@ -127,7 +127,6 @@ class PgsqlConnectCancelTest inherits Test {
                 rv.err = "NONE";
             } catch (hash<ExceptionInfo> ex) {
                 rv.err = ex.err;
-                rv.desc = ex.desc;
             }
             rv.end = clock_get_monotonic_us();
             done.push(rv);
@@ -138,7 +137,7 @@ class PgsqlConnectCancelTest inherits Test {
         int start = clock_get_monotonic_us();
         cancel_thread(tid, "pgsql connect test");
         hash<auto> rv = done.get();
-        assertEq("THREAD-CANCELLED", rv.err, rv.desc);
+        assertEq("THREAD-CANCELLED", rv.err, "the connection attempt was cancelled");
         assertLt(MaxCancelUs, rv.end - start, "the cancellation ends the connection attempt at once");
     }
 
@@ -175,7 +174,6 @@ class PgsqlConnectCancelTest inherits Test {
                 rv.err = "NONE";
             } catch (hash<ExceptionInfo> ex) {
                 rv.err = ex.err;
-                rv.desc = ex.desc;
             }
             rv.end = clock_get_monotonic_us();
             done.push(rv);
@@ -184,7 +182,7 @@ class PgsqlConnectCancelTest inherits Test {
         int start = clock_get_monotonic_us();
         sm.requestInterrupt();
         hash<auto> rv = done.get();
-        assertEq("PROGRAM-INTERRUPTED", rv.err, rv.desc);
+        assertEq("PROGRAM-INTERRUPTED", rv.err, "the connection attempt was interrupted");
         assertLt(MaxCancelUs, rv.end - start);
     }
 }
