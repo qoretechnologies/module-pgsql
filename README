@@ -98,7 +98,7 @@ connection string, then run:
   qore test/pgsql.qtest
 
 Example:
-  export QORE_DB_CONNSTR_PGSQL="pgsql:testuser/testpass@testdb%localhost:5432"
+  export QORE_DB_CONNSTR_PGSQL="pgsql:user/pass@db"
   qore test/pgsql.qtest
 
 Docker-based tests are also available in test/docker_test/

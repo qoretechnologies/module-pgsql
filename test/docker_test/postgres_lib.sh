@@ -25,49 +25,6 @@ pg_check_connection() {
     echo "verified the connection to the test database"
 }
 
-start_postgres() {
-    { local pg_trace_flags=$-; set +x; } 2>/dev/null
-    docker run --name=postgres --network=host -e POSTGRES_PASSWORD=qore -e TZ=Europe/Prague -e PGTZ=Europe/Prague -d pgvector/pgvector:pg18
-
-    # wait for PostgreSQL server to start
-    printf "waiting on PostgreSQL server: "
-    waited=0
-    while true; do
-        ver=`qore -ne 'try { printf("%s", (new Datasource("pgsql:postgres/qore@postgres%localhost:5432")).getServerVersion()); } catch () {}'`
-        if [ -n "$ver" ]; then
-            echo ": started server version $ver"
-            break
-        fi
-
-        # 30 second time limit
-        if [ $waited -eq 30 ]; then
-            echo && echo "Waited too long for PostgreSQL to start; aborting build."
-            exit 1
-        fi
-        printf .
-        # sleep for 1 second
-        sleep 1
-        waited=$((waited+1))
-    done
-
-    export QORE_DB_USER=postgres
-    export QORE_DB_PASS=qore
-    export QORE_DB_NAME=postgres
-    export QORE_DB_HOST=`qore -ne 'printf("%s", (map $1.address, get_netif_list(), $1.family == AF_INET && $1.address !~ /^127/ && $1.address !~ /\.0$/)[0]);'`
-    export QORE_DB_CONNSTR_PGSQL=pgsql:${QORE_DB_USER}/${QORE_DB_PASS}@${QORE_DB_NAME}%${QORE_DB_HOST}
-
-    # make sure we can access the DB
-    pg_check_connection
-
-    # enable pgvector extension if available
-    psql -Upostgres -h ${QORE_DB_HOST} -c "create extension if not exists vector;" ${QORE_DB_NAME} 2>/dev/null || true
-    {
-        case $pg_trace_flags in
-            *x*) set -x ;;
-        esac
-    } 2>/dev/null
-}
-
 # Waits until the PostgreSQL server of the "services" container accepts a connection from the postgres user; fails with a
 # message when it does not within PG_READY_ATTEMPTS attempts (default 120), PG_READY_INTERVAL seconds apart (default 1).
 # It probes with psql, which the job needs anyway, with the arguments of the job (PSQL_ARGS).
