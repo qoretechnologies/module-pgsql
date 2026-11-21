@@ -341,6 +341,11 @@ class ConnectFailoverTest(unittest.TestCase):
         self.assertEqual(1, len(results), error_codes(completed.stdout))
         return json.loads(results[0])
 
+    def assertExactResult(self, expected, result):
+        # the description is compared by its presence: a failed assertion must not print it
+        self.assertEqual(expected, without_desc(result))
+        self.assertFalse('desc' in result, 'the result has an error description')
+
     def assertRejected(self, result):
         self.assertEqual('DBI:PGSQL:ERROR', result.get('err'), without_desc(result))
         self.assertTrue('fixture authentication refused' in result.get('desc', ''), 'fixture authentication refused')
@@ -503,7 +508,7 @@ class ConnectFailoverTest(unittest.TestCase):
         with Listener() as silent:
             result = self.connect([silent.port, endpoint['port']], '127.0.0.1,' + endpoint['host'],
                                   PGSQL_TEST_REOPEN='1')
-            self.assertEqual({'answer': 42}, without_desc(result))
+            self.assertExactResult({'answer': 42}, result)
             self.assertEqual(2, len(silent.connections))
 
     @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')
@@ -513,7 +518,7 @@ class ConnectFailoverTest(unittest.TestCase):
             name = "failover's \\ application"
             result = self.connect([silent.port, endpoint['port']], '127.0.0.1,' + endpoint['host'],
                                   PGAPPNAME=name, PGSQL_TEST_APPNAME='1')
-            self.assertEqual({'application_name': name}, without_desc(result))
+            self.assertExactResult({'application_name': name}, result)
 
     @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')
     def test_prefer_standby_falls_back_to_primary_after_timeout(self):
@@ -521,7 +526,7 @@ class ConnectFailoverTest(unittest.TestCase):
         with Listener() as silent:
             result = self.connect([silent.port, endpoint['port']], '127.0.0.1,' + endpoint['host'],
                                   PGTARGETSESSIONATTRS='prefer-standby')
-            self.assertEqual({'answer': 42}, without_desc(result))
+            self.assertExactResult({'answer': 42}, result)
 
     @unittest.skipUnless(os.environ.get('QORE_DB_CONNSTR_PGSQL'), 'requires a disposable PostgreSQL database')
     def test_target_session_attributes_survive_failover(self):

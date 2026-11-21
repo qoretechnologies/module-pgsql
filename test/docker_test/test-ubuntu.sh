@@ -25,7 +25,7 @@ if [ -z "${MODULE_SRC_DIR}" ]; then
         MODULE_SRC_DIR=$WORKDIR/module-pgsql
     fi
 fi
-echo "export MODULE_SRC_DIR=${MODULE_SRC_DIR}" >> ${ENV_FILE}
+ci_env_export "${ENV_FILE}" MODULE_SRC_DIR "${MODULE_SRC_DIR}"
 
 echo "export QORE_UID=999" >> ${ENV_FILE}
 echo "export QORE_GID=999" >> ${ENV_FILE}

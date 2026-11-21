@@ -16,13 +16,36 @@ pg_error_codes() {
 # Checks that the connection in QORE_DB_CONNSTR_PGSQL works; it is read from the environment, so it is on no command
 # line, and a failure reports only its exception code.
 pg_check_connection() {
+    { local pg_check_flags=$-; set +x; } 2>/dev/null
     local out status=0
     out=$(qore -nX '(new Datasource(ENV.QORE_DB_CONNSTR_PGSQL)).getServerVersion()' 2>&1) || status=$?
     if [ "${status}" != 0 ]; then
         echo "ERROR: cannot connect to the test database: $(pg_error_codes "${out}" "(no error code in the output)")" >&2
-        return "${status}"
+    else
+        echo "verified the connection to the test database"
     fi
-    echo "verified the connection to the test database"
+    {
+        case $pg_check_flags in
+            *x*) set -x ;;
+        esac
+        return "${status}"
+    } 2>/dev/null
+}
+
+# Sets PGPASSWORD from POSTGRES_PASSWORD_MAP for RUNNER_HOST.  The map is read from the environment, so it is neither in
+# the program text nor on a command line, and a failure reports only its exception code.
+pg_read_map_password() {
+    local errors status=0
+    errors=$(mktemp) || return 1
+    PGPASSWORD=$(PG_MAP_HOST="${RUNNER_HOST:=pgsql}" POSTGRES_PASSWORD_MAP="${POSTGRES_PASSWORD_MAP}" qore -l Util -ne \
+        'printf("%s", parse_to_qore_value(ENV.POSTGRES_PASSWORD_MAP){ENV.PG_MAP_HOST});' 2>"${errors}") || status=$?
+    if [ "${status}" != 0 ]; then
+        PGPASSWORD=
+        echo "ERROR: cannot read the PostgreSQL password map:" \
+            "$(pg_error_codes "$(cat "${errors}")" "(no error code in the output)")" >&2
+    fi
+    rm -f "${errors}"
+    return "${status}"
 }
 
 # Waits until the PostgreSQL server of the "services" container accepts a connection from the postgres user; fails with a
@@ -52,27 +75,29 @@ wait_for_postgres_host() {
 
 setup_postgres_on_host() {
     { local pg_trace_flags=$-; set +x; } 2>/dev/null
+    local pg_env="${ENV_FILE:-/tmp/env.sh}"
+    local PG_TEST_PASS=qore
     # add env vars to environment file and load it
     # NOTE: must convert to lower case only, or the psql commands below will fail
     user=qore_test_`qore -lUtil -ne 'printf("%s", get_random_string(10));' | tr A-Z a-z`
-    echo export QORE_DB_USER=${user} >> /tmp/env.sh
-    echo export QORE_DB_PASS=qore >> /tmp/env.sh
-    echo export QORE_DB_NAME=${user} >> /tmp/env.sh
-    echo export QORE_DB_HOST=${RUNNER_HOST:=pgsql} >> /tmp/env.sh
-    systemdb=pgsql:${user}/qore@${user}%${RUNNER_HOST:=pgsql}
-    echo export QORE_DB_CONNSTR_PGSQL=${systemdb} >> /tmp/env.sh
-    echo export QORE_DB_CONNSTR=${systemdb} >> /tmp/env.sh
+    ci_env_export "${pg_env}" QORE_DB_USER "${user}"
+    ci_env_export "${pg_env}" QORE_DB_PASS "${PG_TEST_PASS}"
+    ci_env_export "${pg_env}" QORE_DB_NAME "${user}"
+    ci_env_export "${pg_env}" QORE_DB_HOST "${RUNNER_HOST:=pgsql}"
+    systemdb="pgsql:${user}/${PG_TEST_PASS}@${user}%${RUNNER_HOST:=pgsql}"
+    ci_env_export "${pg_env}" QORE_DB_CONNSTR_PGSQL "${systemdb}"
+    ci_env_export "${pg_env}" QORE_DB_CONNSTR "${systemdb}"
 
     # if we have a password for the local postgres user, then use it and connect to localhost as well
     if [ -n "${POSTGRES_PASSWORD_MAP}" ]; then
-        PGPASSWORD=`qore -l Util -ne "printf(\"%s\", parse_to_qore_value(\"${POSTGRES_PASSWORD_MAP}\"){\"${RUNNER_HOST:=pgsql}\"});"`
+        pg_read_map_password
         if [ -n "${PGPASSWORD}" ]; then
-            echo export PGPASSWORD=${PGPASSWORD} >> /tmp/env.sh
-            echo export PSQL_ARGS=\"-h ${RUNNER_HOST:=pgsql}\" >> /tmp/env.sh
+            ci_env_export "${pg_env}" PGPASSWORD "${PGPASSWORD}"
+            ci_env_export "${pg_env}" PSQL_ARGS "-h ${RUNNER_HOST:=pgsql}"
         fi
     fi
 
-    ci_source_env /tmp/env.sh
+    ci_source_env "${pg_env}"
 
     # the GitLab "services" keyword starts the container but does not wait for the server inside it to finish
     # initializing, so the first connection can be refused
@@ -85,7 +110,7 @@ setup_postgres_on_host() {
 create database ${QORE_DB_NAME} encoding = 'utf8';
 \connect ${QORE_DB_NAME};
 create extension if not exists vector;
-create user ${QORE_DB_USER} password 'qore' createrole;
+create user ${QORE_DB_USER} password '${PG_TEST_PASS}' createrole;
 grant create, connect, temp on database ${QORE_DB_NAME} to ${QORE_DB_USER};
 grant select on all tables in schema pg_catalog to ${QORE_DB_USER};
 grant all on schema public to ${QORE_DB_USER};

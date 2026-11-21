@@ -62,4 +62,85 @@ for shell in bash sh; do
     expect $shell "the status is returned without set -e" 0 "7 on" \
         "set -x; ci_source_env '$work/status.sh'; { rc=\$?; echo \"\$rc \$(case \$- in *x*) echo on ;; *) echo off ;; esac)\"; } 2>/dev/null"
 done
+
+# setup_postgres_on_host (postgres_lib.sh) under "set -x", with stub tools: for each value, nothing of it reaches the
+# output or the trace, it is neither split nor executed, and it reaches a child process unchanged
+mkdir -p "$work/bin"
+cat > "$work/bin/qore" <<'STUB'
+#!/bin/sh
+case "$*" in
+    *get_random_string*) printf abcdefghij; exit 0 ;;
+    *parse_to_qore_value*)
+        if [ "${STUB_FAIL:-}" = map ]; then
+            echo "PARSE-EXCEPTION: bad value in ${POSTGRES_PASSWORD_MAP}" >&2
+            exit 3
+        fi
+        printf '%s' "${POSTGRES_PASSWORD_MAP#pgsql=}"
+        exit 0 ;;
+    *getServerVersion*)
+        if [ "${STUB_FAIL:-}" = connection ]; then
+            echo "DATASOURCE-PARSE-ERROR: missing database name in 'pgsql:u/${POSTGRES_PASSWORD_MAP}'" >&2
+            exit 4
+        fi
+        echo 180000
+        exit 0 ;;
+esac
+exit 0
+STUB
+cat > "$work/bin/psql" <<'STUB'
+#!/bin/sh
+case "$*" in
+    *"select 1"*) ;;
+    *) cat > /dev/null ;;
+esac
+exit 0
+STUB
+chmod +x "$work/bin/qore" "$work/bin/psql"
+
+# check_setup <shell> <name> <expected status> <expected output> <value> [<stub failure>]
+check_setup() {
+    local shell=$1 name="$1: setup: $2" expected_rc=$3 expected_out=$4 value=$5 stub_fail=${6:-} out rc
+    : > "$work/setup-env.sh"
+    rm -f "$work/executed"
+    printf '%s' "$value" > "$work/setup-expected"
+    out=$(cd "$work" && PATH="$work/bin:$PATH" POSTGRES_PASSWORD_MAP="pgsql=$value" STUB_FAIL="$stub_fail" \
+        RUNNER_HOST=pgsql ENV_FILE="$work/setup-env.sh" TMPDIR="$work" "$shell" -c "
+        . \"$here/ci_env.sh\"
+        . \"$here/postgres_lib.sh\"
+        set -e
+        set -x
+        setup_postgres_on_host
+        { case \$- in *x*) echo tracing-on ;; *) echo tracing-off ;; esac; } 2>/dev/null
+        bash -c '[ \"\$PGPASSWORD\" = \"\$(cat setup-expected)\" ] && echo exported'
+        " 2>&1)
+    rc=$?
+    if [ "$rc" != "$expected_rc" ]; then
+        echo "FAIL: $name: expected status $expected_rc, got $rc"
+        fail=1
+    elif [ -e "$work/executed" ]; then
+        echo "FAIL: $name: the value was executed"
+        fail=1
+    elif printf '%s' "$out" | grep -q -F "$sentinel"; then
+        echo "FAIL: $name: the value is in the output or the trace"
+        fail=1
+    elif ! printf '%s\n' "$out" | grep -q -F -- "$expected_out"; then
+        echo "FAIL: $name: the expected result is not in the output"
+        fail=1
+    else
+        echo "ok: $name"
+    fi
+}
+
+for shell in bash sh; do
+    check_setup $shell "a plain value" 0 exported "$sentinel"
+    check_setup $shell "tracing is restored" 0 tracing-on "$sentinel"
+    check_setup $shell "white space" 0 exported "a  b $sentinel c"
+    check_setup $shell "single quotes" 0 exported "it's '$sentinel'"
+    check_setup $shell "double quotes" 0 exported "\"$sentinel\""
+    check_setup $shell "a command substitution" 0 exported "\$(touch executed)$sentinel"
+    check_setup $shell "backticks" 0 exported "\`touch executed\`$sentinel"
+    check_setup $shell "a semicolon" 0 exported "x;touch executed;$sentinel"
+    check_setup $shell "a failed map keeps its code only" 3 PARSE-EXCEPTION "$sentinel" map
+    check_setup $shell "a failed connection keeps its code only" 4 DATASOURCE-PARSE-ERROR "$sentinel" connection
+done
 exit $fail
