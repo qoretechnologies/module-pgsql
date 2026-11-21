@@ -6,10 +6,12 @@
 # pg_error_codes <output> [<text to print if the output has no code>]
 #
 # Prints the exception code of the output of a failed command, and nothing else of it: the description of an exception
-# can contain the connection string.
+# can contain the connection string.  Only the codes that these commands raise are accepted, so that a line of a
+# multi-line value that merely looks like a code is not reported.
 pg_error_codes() {
     local code
-    code=$(printf '%s\n' "$1" | sed -n -E 's/^([A-Z][A-Z0-9_]*((:[A-Z0-9_-]+)|(-[A-Z0-9_]+))+): .*/\1/p' | head -n 1)
+    code=$(printf '%s\n' "$1" | sed -n -E \
+        's/^( \* <[a-z-]+>:-?[0-9]+: )?(DBI:PGSQL:(ARRAY-BIND-ERROR|ARRAY-ERROR|BIND-ERROR|CONNECTION-ERROR|COPY-ERROR|ENCODING-ERROR|ERROR|EXEC-EXCEPTION|TIMEZONE-ERROR|TYPE-ERROR|UNKNOWN-CHARACTER-SET)|DATASOURCE-PARSE-ERROR|PARSE-ERROR|PARSE-EXCEPTION|LOAD-MODULE-ERROR): .*/\2/p' | head -n 1)
     printf '%s\n' "${code:-${2:-}}"
 }
 
@@ -35,17 +37,32 @@ pg_check_connection() {
 # Sets PGPASSWORD from POSTGRES_PASSWORD_MAP for RUNNER_HOST.  The map is read from the environment, so it is neither in
 # the program text nor on a command line, and a failure reports only its exception code.
 pg_read_map_password() {
-    local errors status=0
-    errors=$(mktemp) || return 1
-    PGPASSWORD=$(PG_MAP_HOST="${RUNNER_HOST:=pgsql}" POSTGRES_PASSWORD_MAP="${POSTGRES_PASSWORD_MAP}" qore -l Util -ne \
-        'printf("%s", parse_to_qore_value(ENV.POSTGRES_PASSWORD_MAP){ENV.PG_MAP_HOST});' 2>"${errors}") || status=$?
-    if [ "${status}" != 0 ]; then
-        PGPASSWORD=
-        echo "ERROR: cannot read the PostgreSQL password map:" \
-            "$(pg_error_codes "$(cat "${errors}")" "(no error code in the output)")" >&2
+    { local pg_map_flags=$-; set +x; } 2>/dev/null
+    local out status=0
+    # the markers separate the value from anything else on the merged output; no temporary file holds the output
+    out=$(PG_MAP_HOST="${RUNNER_HOST:=pgsql}" POSTGRES_PASSWORD_MAP="${POSTGRES_PASSWORD_MAP}" qore -l Util -ne \
+        'printf("<<PGMAP>>%s<<END>>", parse_to_qore_value(ENV.POSTGRES_PASSWORD_MAP){ENV.PG_MAP_HOST});' 2>&1) || status=$?
+    PGPASSWORD=
+    if [ "${status}" = 0 ]; then
+        case "${out}" in
+            *"<<PGMAP>>"*"<<END>>"*)
+                PGPASSWORD=${out#*"<<PGMAP>>"}
+                PGPASSWORD=${PGPASSWORD%"<<END>>"*}
+                ;;
+            *)
+                status=1
+                ;;
+        esac
     fi
-    rm -f "${errors}"
-    return "${status}"
+    if [ "${status}" != 0 ]; then
+        echo "ERROR: cannot read the PostgreSQL password map: $(pg_error_codes "${out}" "(no error code in the output)")" >&2
+    fi
+    {
+        case $pg_map_flags in
+            *x*) set -x ;;
+        esac
+        return "${status}"
+    } 2>/dev/null
 }
 
 # Waits until the PostgreSQL server of the "services" container accepts a connection from the postgres user; fails with a

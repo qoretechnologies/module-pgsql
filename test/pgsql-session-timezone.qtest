@@ -276,7 +276,7 @@ class SessionTimeZoneTest inherits Test {
         string out = backquote(cmd, \rc);
         # assertions print this output, and the description of an exception in it can hold the connection string
         if (rc || out =~ /unhandled QORE/) {
-            *string code = (out =~ x/^([A-Z][A-Z0-9_]*(?:[:-][A-Z0-9_-]+)+): /m)[0];
+            *string code = (out =~ x/^(DBI:PGSQL:(?:ARRAY-BIND-ERROR|ARRAY-ERROR|BIND-ERROR|CONNECTION-ERROR|COPY-ERROR|ENCODING-ERROR|ERROR|EXEC-EXCEPTION|TIMEZONE-ERROR|TYPE-ERROR|UNKNOWN-CHARACTER-SET)|DATASOURCE-PARSE-ERROR|PARSE-ERROR|PARSE-EXCEPTION|LOAD-MODULE-ERROR): /m)[0];
             return sprintf("the child failed with status %d: %s", rc, code ?? "no exception code");
         }
         return out;

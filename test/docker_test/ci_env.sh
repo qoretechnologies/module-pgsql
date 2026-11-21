@@ -33,8 +33,13 @@ ci_source_env() {
 ci_env_export() {
     { local ci_env_export_flags=$-; set +x; } 2>/dev/null
     local ci_env_export_value ci_env_export_status=0
-    ci_env_export_value=$(printf '%s' "$3" | sed "s/'/'\\\\''/g")
-    printf "export %s='%s'\n" "$2" "${ci_env_export_value}" >> "$1" || ci_env_export_status=$?
+    if ci_env_export_value=$(printf '%s' "$3" | sed "s/'/'\\\\''/g"); then
+        printf "export %s='%s'\n" "$2" "${ci_env_export_value}" >> "$1" || ci_env_export_status=$?
+    else
+        # nothing is written: an empty export would replace the value
+        ci_env_export_status=1
+        echo "ERROR: cannot quote the value of $2 for the CI environment file" >&2
+    fi
     {
         case $ci_env_export_flags in
             *x*) set -x ;;

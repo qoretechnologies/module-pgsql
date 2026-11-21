@@ -26,7 +26,7 @@ from pathlib import Path
 
 def error_codes(text):
     """The exception codes in the output of a child: the rest of it can hold the connection string."""
-    return re.findall(r'^([A-Z][A-Z0-9_]*(?:[:-][A-Z0-9_-]+)+): ', text, re.M)
+    return re.findall(r'^(DBI:PGSQL:(?:ARRAY-BIND-ERROR|ARRAY-ERROR|BIND-ERROR|CONNECTION-ERROR|COPY-ERROR|ENCODING-ERROR|ERROR|EXEC-EXCEPTION|TIMEZONE-ERROR|TYPE-ERROR|UNKNOWN-CHARACTER-SET)|DATASOURCE-PARSE-ERROR|PARSE-ERROR|PARSE-EXCEPTION|LOAD-MODULE-ERROR): ', text, re.M)
 
 
 def without_desc(result):

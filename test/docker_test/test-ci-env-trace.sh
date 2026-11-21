@@ -9,7 +9,11 @@
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 sentinel=FAKE-SENTINEL-NOT-A-CREDENTIAL
-work=$(mktemp -d)
+work=$(mktemp -d) || exit 1
+if [ -z "$work" ] || [ ! -d "$work" ]; then
+    echo "FAIL: cannot create a temporary directory"
+    exit 1
+fi
 trap 'rm -rf "$work"' EXIT
 fail=0
 
@@ -64,24 +68,33 @@ for shell in bash sh; do
 done
 
 # setup_postgres_on_host (postgres_lib.sh) under "set -x", with stub tools: for each value, nothing of it reaches the
-# output or the trace, it is neither split nor executed, and it reaches a child process unchanged
-mkdir -p "$work/bin"
+# output, the trace or a command line, it is neither split nor executed, and it reaches a child process unchanged
+mkdir -p "$work/bin" "$work/tmp" "$work/badsed"
 cat > "$work/bin/qore" <<'STUB'
 #!/bin/sh
+case "$*" in
+    *FAKE-SENTINEL-NOT-A-CREDENTIAL*)
+        : > "${STUB_DIR}/args-leak"
+        exit 99 ;;
+esac
 case "$*" in
     *get_random_string*) printf abcdefghij; exit 0 ;;
     *parse_to_qore_value*)
         if [ "${STUB_FAIL:-}" = map ]; then
-            echo "PARSE-EXCEPTION: bad value in ${POSTGRES_PASSWORD_MAP}" >&2
+            echo "PARSE-ERROR: bad value in ${POSTGRES_PASSWORD_MAP}" >&2
             exit 3
         fi
-        printf '%s' "${POSTGRES_PASSWORD_MAP#pgsql=}"
+        printf '<<PGMAP>>%s<<END>>' "${POSTGRES_PASSWORD_MAP#pgsql=}"
         exit 0 ;;
     *getServerVersion*)
-        if [ "${STUB_FAIL:-}" = connection ]; then
-            echo "DATASOURCE-PARSE-ERROR: missing database name in 'pgsql:u/${POSTGRES_PASSWORD_MAP}'" >&2
-            exit 4
-        fi
+        case "${STUB_FAIL:-}" in
+            connection)
+                echo "DATASOURCE-PARSE-ERROR: missing database name in 'pgsql:u/${POSTGRES_PASSWORD_MAP}'" >&2
+                exit 4 ;;
+            noisy)
+                echo "180000 ${POSTGRES_PASSWORD_MAP}"
+                exit 0 ;;
+        esac
         echo 180000
         exit 0 ;;
 esac
@@ -90,46 +103,89 @@ STUB
 cat > "$work/bin/psql" <<'STUB'
 #!/bin/sh
 case "$*" in
+    *FAKE-SENTINEL-NOT-A-CREDENTIAL*)
+        : > "${STUB_DIR}/args-leak"
+        exit 99 ;;
     *"select 1"*) ;;
     *) cat > /dev/null ;;
 esac
 exit 0
 STUB
-chmod +x "$work/bin/qore" "$work/bin/psql"
+printf '#!/bin/sh\nexit 1\n' > "$work/badsed/sed"
+chmod +x "$work/bin/qore" "$work/bin/psql" "$work/badsed/sed"
+
+# run_lib <shell> <stub failure> <value> <script>: runs the script with the helpers loaded and the stubs first in PATH
+run_lib() {
+    (cd "$work" && PATH="$work/bin:$PATH" STUB_DIR="$work" POSTGRES_PASSWORD_MAP="pgsql=$3" STUB_FAIL="$2" \
+        RUNNER_HOST=pgsql ENV_FILE="$work/setup-env.sh" TMPDIR="$work/tmp" "$1" -c "
+        . \"$here/ci_env.sh\"
+        . \"$here/postgres_lib.sh\"
+        $4" 2>&1)
+}
+
+# check_output <name> <status> <expected status> <expected output> <output>
+check_output() {
+    if [ "$2" != "$3" ]; then
+        echo "FAIL: $1: expected status $3, got $2"
+        fail=1
+    elif [ -e "$work/args-leak" ]; then
+        echo "FAIL: $1: the value is on a command line"
+        fail=1
+    elif [ -e "$work/executed" ]; then
+        echo "FAIL: $1: the value was executed"
+        fail=1
+    elif [ -n "$(ls -A "$work/tmp")" ]; then
+        echo "FAIL: $1: a temporary file was left behind"
+        fail=1
+    elif printf '%s' "$5" | grep -q -F "$sentinel"; then
+        echo "FAIL: $1: the value is in the output or the trace"
+        fail=1
+    elif ! printf '%s\n' "$5" | grep -q -F -- "$4"; then
+        echo "FAIL: $1: the expected result is not in the output"
+        fail=1
+    else
+        echo "ok: $1"
+    fi
+}
 
 # check_setup <shell> <name> <expected status> <expected output> <value> [<stub failure>]
 check_setup() {
-    local shell=$1 name="$1: setup: $2" expected_rc=$3 expected_out=$4 value=$5 stub_fail=${6:-} out rc
+    local out rc
     : > "$work/setup-env.sh"
-    rm -f "$work/executed"
-    printf '%s' "$value" > "$work/setup-expected"
-    out=$(cd "$work" && PATH="$work/bin:$PATH" POSTGRES_PASSWORD_MAP="pgsql=$value" STUB_FAIL="$stub_fail" \
-        RUNNER_HOST=pgsql ENV_FILE="$work/setup-env.sh" TMPDIR="$work" "$shell" -c "
-        . \"$here/ci_env.sh\"
-        . \"$here/postgres_lib.sh\"
+    rm -f "$work/executed" "$work/args-leak"
+    printf '%s' "$5" > "$work/setup-expected"
+    out=$(run_lib "$1" "${6:-}" "$5" "
         set -e
         set -x
         setup_postgres_on_host
         { case \$- in *x*) echo tracing-on ;; *) echo tracing-off ;; esac; } 2>/dev/null
         bash -c '[ \"\$PGPASSWORD\" = \"\$(cat setup-expected)\" ] && echo exported'
-        " 2>&1)
+        ")
     rc=$?
-    if [ "$rc" != "$expected_rc" ]; then
-        echo "FAIL: $name: expected status $expected_rc, got $rc"
-        fail=1
-    elif [ -e "$work/executed" ]; then
-        echo "FAIL: $name: the value was executed"
-        fail=1
-    elif printf '%s' "$out" | grep -q -F "$sentinel"; then
-        echo "FAIL: $name: the value is in the output or the trace"
-        fail=1
-    elif ! printf '%s\n' "$out" | grep -q -F -- "$expected_out"; then
-        echo "FAIL: $name: the expected result is not in the output"
-        fail=1
-    else
-        echo "ok: $name"
-    fi
+    check_output "$1: setup: $2" "$rc" "$3" "$4" "$out"
 }
+
+# check_direct <shell> <function> <stub failure> <expected status> <tracing: on or off>: the function keeps the value
+# out of a trace and restores the caller's tracing state, on success and on failure
+check_direct() {
+    local out rc start=
+    if [ "$5" = on ]; then
+        start="set -x"
+    fi
+    rm -f "$work/executed" "$work/args-leak"
+    out=$(run_lib "$1" "$3" "$sentinel" "
+        $start
+        $2
+        rc=\$?
+        { case \$- in *x*) t=on ;; *) t=off ;; esac; echo \"result=\$rc tracing-\$t\"; } 2>/dev/null
+        ")
+    rc=$?
+    check_output "$1: $2: failure mode '${3:-none}', tracing $5" "$rc" 0 "result=$4 tracing-$5" "$out"
+}
+
+newline_value="first line
+$sentinel
+last line"
 
 for shell in bash sh; do
     check_setup $shell "a plain value" 0 exported "$sentinel"
@@ -140,7 +196,28 @@ for shell in bash sh; do
     check_setup $shell "a command substitution" 0 exported "\$(touch executed)$sentinel"
     check_setup $shell "backticks" 0 exported "\`touch executed\`$sentinel"
     check_setup $shell "a semicolon" 0 exported "x;touch executed;$sentinel"
-    check_setup $shell "a failed map keeps its code only" 3 PARSE-EXCEPTION "$sentinel" map
+    check_setup $shell "backslashes" 0 exported "a\\b\\n\\\\$sentinel\\"
+    check_setup $shell "newlines" 0 exported "$newline_value"
+    check_setup $shell "a failed map keeps its code only" 3 PARSE-ERROR "$sentinel" map
     check_setup $shell "a failed connection keeps its code only" 4 DATASOURCE-PARSE-ERROR "$sentinel" connection
+
+    for trace in on off; do
+        check_direct $shell pg_check_connection noisy 0 $trace
+        check_direct $shell pg_check_connection connection 4 $trace
+        check_direct $shell pg_read_map_password "" 0 $trace
+        check_direct $shell pg_read_map_password map 3 $trace
+    done
+
+    # a value that cannot be quoted is not written, whether or not the caller uses "set -e"
+    : > "$work/sed-env.sh"
+    out=$(PATH="$work/badsed:$PATH" "$shell" -c ". \"$here/ci_env.sh\"
+        ci_env_export \"$work/sed-env.sh\" CI_ENV_TEST_VALUE \"\$CI_ENV_TEST_INPUT\"
+        echo \"status=\$?\"" 2>&1 < /dev/null)
+    if ! printf '%s\n' "$out" | grep -q '^status=1$' || [ -s "$work/sed-env.sh" ]; then
+        echo "FAIL: $shell: a failed quote must fail and write nothing"
+        fail=1
+    else
+        echo "ok: $shell: a failed quote fails and writes nothing"
+    fi
 done
 exit $fail

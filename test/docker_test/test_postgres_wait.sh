@@ -8,7 +8,11 @@
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(mktemp -d) || exit 1
+if [ -z "${TEST_DIR}" ] || [ ! -d "${TEST_DIR}" ]; then
+    echo "FAILED: cannot create a temporary directory" >&2
+    exit 1
+fi
 trap 'rm -rf "${TEST_DIR}"' EXIT
 
 . "${SCRIPT_DIR}/postgres_lib.sh"
@@ -94,6 +98,9 @@ got=$(pg_error_codes "DBI:PGSQL:ERROR: ${fake_secret}@db: failed" none)
 [ "${got}" = "DBI:PGSQL:ERROR" ] || fail "pg_error_codes should report a driver error code"
 got=$(pg_error_codes "pgsql:u/${fake_secret}@db" none)
 [ "${got}" = none ] || fail "pg_error_codes should report no code for text without one"
+got=$(pg_error_codes "first line
+AB-CD: ${fake_secret}" none)
+[ "${got}" = none ] || fail "pg_error_codes should not report a line that only looks like a code"
 checks=$((checks + 1))
 
 cat > "${TEST_DIR}/bin/qore" <<'STUB'
