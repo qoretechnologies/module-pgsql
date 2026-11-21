@@ -5,7 +5,12 @@ set -x
 
 ENV_FILE=/tmp/env.sh
 
-. ${ENV_FILE}
+# the environment file holds credentials: see ci_env.sh
+. "$(dirname "${BASH_SOURCE[0]}")/ci_env.sh"
+# the helper keeps credentials out of the trace: a failure here fails the job before it is relied on
+"$(dirname "${BASH_SOURCE[0]}")/test-ci-env-trace.sh"
+
+ci_source_env "${ENV_FILE}"
 
 apk add postgresql-client
 
@@ -27,7 +32,7 @@ echo "export MODULE_SRC_DIR=${MODULE_SRC_DIR}" >> ${ENV_FILE}
 echo "export QORE_UID=1000" >> ${ENV_FILE}
 echo "export QORE_GID=1000" >> ${ENV_FILE}
 
-. ${ENV_FILE}
+ci_source_env "${ENV_FILE}"
 
 export MAKE_JOBS=4
 

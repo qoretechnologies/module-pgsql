@@ -85,4 +85,49 @@ psql_line=$(printf '%s\n' "${body}" | grep -n 'psql -Upostgres' | head -1 | cut 
 [ "${wait_line}" -lt "${psql_line}" ] || fail "setup_postgres_on_host runs psql before it waits for the server"
 checks=$((checks + 1))
 
+# only the code of a failed connection check is reported: the rest of its output can hold the connection string
+fake_secret=FAKE-SENTINEL-NOT-A-CREDENTIAL
+got=$(pg_error_codes "unhandled exception
+DATASOURCE-PARSE-ERROR: missing database name in 'pgsql:u/${fake_secret}'" none)
+[ "${got}" = DATASOURCE-PARSE-ERROR ] || fail "pg_error_codes should report the exception code"
+got=$(pg_error_codes "DBI:PGSQL:ERROR: ${fake_secret}@db: failed" none)
+[ "${got}" = "DBI:PGSQL:ERROR" ] || fail "pg_error_codes should report a driver error code"
+got=$(pg_error_codes "pgsql:u/${fake_secret}@db" none)
+[ "${got}" = none ] || fail "pg_error_codes should report no code for text without one"
+checks=$((checks + 1))
+
+cat > "${TEST_DIR}/bin/qore" <<'STUB'
+#!/bin/sh
+if [ "${STUB_QORE}" = ok ]; then
+    echo 180000
+    exit 0
+fi
+msg="DATASOURCE-PARSE-ERROR: missing database name in 'pgsql:u/FAKE-SENTINEL-NOT-A-CREDENTIAL'"
+if [ "${STUB_QORE}" = stderr ]; then
+    echo "${msg}" >&2
+else
+    echo "${msg}"
+fi
+exit 3
+STUB
+chmod +x "${TEST_DIR}/bin/qore"
+for STUB_QORE in stdout stderr; do
+    export STUB_QORE
+    rc=0
+    out=$(pg_check_connection 2>&1) || rc=$?
+    [ "${rc}" -eq 3 ] || fail "a failed connection check should return the status of the command (${rc})"
+    case "${out}" in
+        *"${fake_secret}"*) fail "a failed connection check (${STUB_QORE}) printed the output of the command" ;;
+    esac
+    case "${out}" in
+        *DATASOURCE-PARSE-ERROR*) ;;
+        *) fail "a failed connection check (${STUB_QORE}) should report the exception code" ;;
+    esac
+    checks=$((checks + 1))
+done
+STUB_QORE=ok
+export STUB_QORE
+pg_check_connection > /dev/null || fail "a working connection should pass the check"
+checks=$((checks + 1))
+
 echo "PostgreSQL readiness wait self-test passed (${checks} checks)"

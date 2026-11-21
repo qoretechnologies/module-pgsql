@@ -1,6 +1,32 @@
 #!/bin/sh
 
+# The functions that handle credentials do not trace them: they turn tracing off and restore the caller's state.
+# ci_source_env() is in ci_env.sh, which the job sources first.
+
+# pg_error_codes <output> [<text to print if the output has no code>]
+#
+# Prints the exception code of the output of a failed command, and nothing else of it: the description of an exception
+# can contain the connection string.
+pg_error_codes() {
+    local code
+    code=$(printf '%s\n' "$1" | sed -n -E 's/^([A-Z][A-Z0-9_]*((:[A-Z0-9_-]+)|(-[A-Z0-9_]+))+): .*/\1/p' | head -n 1)
+    printf '%s\n' "${code:-${2:-}}"
+}
+
+# Checks that the connection in QORE_DB_CONNSTR_PGSQL works; it is read from the environment, so it is on no command
+# line, and a failure reports only its exception code.
+pg_check_connection() {
+    local out status=0
+    out=$(qore -nX '(new Datasource(ENV.QORE_DB_CONNSTR_PGSQL)).getServerVersion()' 2>&1) || status=$?
+    if [ "${status}" != 0 ]; then
+        echo "ERROR: cannot connect to the test database: $(pg_error_codes "${out}" "(no error code in the output)")" >&2
+        return "${status}"
+    fi
+    echo "verified the connection to the test database"
+}
+
 start_postgres() {
+    { local pg_trace_flags=$-; set +x; } 2>/dev/null
     docker run --name=postgres --network=host -e POSTGRES_PASSWORD=qore -e TZ=Europe/Prague -e PGTZ=Europe/Prague -d pgvector/pgvector:pg18
 
     # wait for PostgreSQL server to start
@@ -31,10 +57,15 @@ start_postgres() {
     export QORE_DB_CONNSTR_PGSQL=pgsql:${QORE_DB_USER}/${QORE_DB_PASS}@${QORE_DB_NAME}%${QORE_DB_HOST}
 
     # make sure we can access the DB
-    qore -nX "(new Datasource(\"${QORE_DB_CONNSTR_PGSQL}\")).getServerVersion()"
+    pg_check_connection
 
     # enable pgvector extension if available
     psql -Upostgres -h ${QORE_DB_HOST} -c "create extension if not exists vector;" ${QORE_DB_NAME} 2>/dev/null || true
+    {
+        case $pg_trace_flags in
+            *x*) set -x ;;
+        esac
+    } 2>/dev/null
 }
 
 # Waits until the PostgreSQL server of the "services" container accepts a connection from the postgres user; fails with a
@@ -63,6 +94,7 @@ wait_for_postgres_host() {
 }
 
 setup_postgres_on_host() {
+    { local pg_trace_flags=$-; set +x; } 2>/dev/null
     # add env vars to environment file and load it
     # NOTE: must convert to lower case only, or the psql commands below will fail
     user=qore_test_`qore -lUtil -ne 'printf("%s", get_random_string(10));' | tr A-Z a-z`
@@ -83,15 +115,16 @@ setup_postgres_on_host() {
         fi
     fi
 
-    . /tmp/env.sh
+    ci_source_env /tmp/env.sh
 
     # the GitLab "services" keyword starts the container but does not wait for the server inside it to finish
     # initializing, so the first connection can be refused
     wait_for_postgres_host
 
+    # VERBOSITY=sqlstate: an error is reported by its code, without the statement, which holds a password
     # create user for test; CREATEROLE lets SqlUtil's PgsqlBoundedTransaction.qtest create (and drop) the role its
     # row-security case needs
-    cat <<EOF | psql -Upostgres ${PSQL_ARGS}
+    cat <<EOF | psql -Upostgres -v VERBOSITY=sqlstate ${PSQL_ARGS}
 create database ${QORE_DB_NAME} encoding = 'utf8';
 \connect ${QORE_DB_NAME};
 create extension if not exists vector;
@@ -103,7 +136,13 @@ EOF
     echo created pgsql user ${QORE_DB_USER} and db ${QORE_DB_NAME}
 
     # make sure we can access the DB
-    qore -nX "(new Datasource(\"${QORE_DB_CONNSTR_PGSQL}\")).getServerVersion()"
+    pg_check_connection
+
+    {
+        case $pg_trace_flags in
+            *x*) set -x ;;
+        esac
+    } 2>/dev/null
 
     export POSTGRES_HOST=1
 }
