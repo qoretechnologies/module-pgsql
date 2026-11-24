@@ -22,6 +22,16 @@
     the database of QORE_DB_CONNSTR_PGSQL, and skip if it cannot be reached that way (by TCP or by the default UNIX
     socket) without a sandbox.
 
+    The cases that check the address that a connection is made to compare the address that the server reports
+    (\c inet_server_addr()) with those of the host, which needs a direct connection to the test database: behind
+    address translation (a published container port or a TCP forwarder) the server reports its own side of the
+    connection, so these cases check only that a connection reaches the same server address as a connection outside
+    the sandbox, and say so (qore#7170); their other checks are made as on a direct connection.
+
+    Some refused cases and the default socket case name libpq's default endpoint (\c 127.0.0.1:5432 and the default
+    UNIX socket) with credentials that no server accepts; run the test only where a server there, if any, is a
+    disposable one, as the failed logins reach that server's log and any lockout policy.
+
     Needs a Qore with the DBI sandbox check (DBI_CAP_LOCAL_ONLY); the test skips otherwise.
 */
 class PgsqlSandboxTest inherits QUnit::Test {
@@ -188,15 +198,31 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
         if (!c.host || c.host =~ /^[\/@]/) {
             testSkip("QORE_DB_CONNSTR_PGSQL does not give a TCP host");
         }
+        *string addr;
         try {
             Datasource ds(c);
             ds.open();
             on_exit ds.close();
-            ds.selectRow("select 1");
+            addr = ds.selectRow("select inet_server_addr()::text as addr").addr;
         } catch (hash<ExceptionInfo> ex) {
             testSkip("the test database cannot be reached by TCP: " + ex.err);
         }
-        return {"c": c, "addrs": serverAddresses(c.host)};
+        if (!addr) {
+            testSkip(sprintf("the test database at %y reports no server address for a TCP connection", c.host));
+        }
+        list<string> addrs = serverAddresses(c.host);
+        hash<auto> rv = {"c": c, "addrs": addrs};
+        # behind address translation the server reports its own side of the connection, which is not an address of
+        # the host that the client connects to, so only the server address can be compared (qore#7170)
+        if (!inlist(addr, addrs)) {
+            rv.translated = addr;
+            printf("NOTE: the connection to %s:%d is address-translated (ex: a published container port or a TCP "
+                "forwarder): the server reports the address %y, which is not one of the addresses of %y (%y); the "
+                "address that the driver connects to is checked only to reach the same server address, which needs a "
+                "direct connection to the test database to check exactly\n", c.host, c.port ?? DefaultPort, addr,
+                c.host, addrs);
+        }
+        return rv;
     }
 
     #! returns the addresses of a host as PostgreSQL reports them (\c inet_server_addr()::text)
@@ -212,7 +238,15 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
     }
 
     #! checks that a connection made in the sandbox reports one of the checked addresses
+    /** Behind address translation (\c translated, see tcpParams()), the address is the server's side of the
+        connection: the connection reaches the same server address as one outside the sandbox
+    */
     private checkAddress(hash<auto> t, auto addr, string desc) {
+        if (t.translated) {
+            assertEq(t.translated, addr, sprintf("%s (address-translated connection: the same server address as a "
+                "connection outside the sandbox)", desc));
+            return;
+        }
         assertTrue(inlist(addr, t.addrs), sprintf("%s: %y is one of %y", desc, addr, t.addrs));
     }
 
