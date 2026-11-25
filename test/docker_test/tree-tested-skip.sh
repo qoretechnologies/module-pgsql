@@ -1,7 +1,7 @@
 #!/bin/sh
 # Copyright (C) 2026 Qore Technologies, s.r.o.
 # SPDX-License-Identifier: MIT
-# Source before pending status/build/test commands. Adapted from qore commit
+# Source before building or testing. Adapted from qore commit
 # 22a9b5c721. Returning runs the full job; exiting skips its already-tested work.
 
 if [ "${CI_COMMIT_BRANCH:-}" != develop ] || [ "${CI_PIPELINE_SOURCE:-}" != push ] \
@@ -20,21 +20,10 @@ fi
 current_tree=$(git rev-parse 'HEAD^{tree}' 2>/dev/null) || return 0
 if [ "${QORE_TREE_TESTED_IN}" = "${CI_PIPELINE_ID:-}" ] \
         || [ "${QORE_TREE_TESTED_TREE:-}" != "$current_tree" ] \
-        || [ -z "${GITHUB_ACCESS_TOKEN:+set}" ] || [ -z "${CI_PROJECT_URL:-}" ] \
-        || [ -z "${CI_COMMIT_SHA:-}" ] || [ -z "${REPO_NAME:-}" ]; then
+        || [ -z "${CI_PROJECT_URL:-}" ]; then
     return 0
 fi
 
 tested_url="${CI_PROJECT_URL}/-/pipelines/${QORE_TREE_TESTED_IN}"
 echo "this tree passed both platform jobs in pipeline ${QORE_TREE_TESTED_IN}: ${tested_url}"
-# Never trace the credential. If the status cannot be published, run the full
-# job so its normal status/reporting path remains responsible for the result.
-set +x
-if curl -fsS --max-time 30 \
-        "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
-        -X POST --oauth2-bearer "${GITHUB_ACCESS_TOKEN}" -H "Content-Type: application/json" \
-        -d "{\"state\":\"success\",\"context\":\"${REPO_NAME}\",\"description\":\"tree tested in pipeline ${QORE_TREE_TESTED_IN}\",\"target_url\":\"${tested_url}\"}" \
-        > /dev/null; then
-    exit 0
-fi
-echo "could not publish the successful-tree status: running the full job"
+exit 0
