@@ -3888,11 +3888,12 @@ int PgsqlPinnedSockets::add(Datasource* ds, const char* path, const std::string&
     // the socket file itself, opened without following a link (O_PATH opens no file)
     e->sfd = qore_dbi_pinned_path_open(e->pin, nullptr, O_PATH, 0);
     struct stat sbuf;
-    if (e->sfd < 0 || fstat(e->sfd, &sbuf) || !S_ISSOCK(sbuf.st_mode)) {
-        if (e->sfd >= 0 ? S_ISLNK(sbuf.st_mode) : errno == ELOOP) {
+    bool have_stat = e->sfd >= 0 && !fstat(e->sfd, &sbuf);
+    if (!have_stat || !S_ISSOCK(sbuf.st_mode)) {
+        if (have_stat ? S_ISLNK(sbuf.st_mode) : errno == ELOOP) {
             xsink->raiseException("FILESYSTEM-ACCESS-DENIED", "Access to '%s' denied: the path changed while it was "
                 "checked", path);
-        } else if (e->sfd >= 0) {
+        } else if (have_stat) {
             xsink->raiseException("DBI:PGSQL:ERROR", "'%s' is not a UNIX socket", path);
         } else {
             xsink->raiseErrnoException("DBI:PGSQL:ERROR", errno, "cannot connect to the UNIX socket '%s'", path);
@@ -3914,15 +3915,25 @@ int PgsqlPinnedSockets::add(Datasource* ds, const char* path, const std::string&
     if (e->parentfd >= 0) {
         e->dirfd = openat(e->parentfd, e->name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     }
-    struct stat dbuf;
-    if (e->dirfd < 0 || fstat(e->dirfd, &dbuf) || dbuf.st_uid != geteuid() || (dbuf.st_mode & 07777) != S_IRWXU
-            || dbuf.st_nlink != 2) {
+    if (e->dirfd < 0) {
         int err = errno;
-        if (e->dirfd < 0) {
-            rmdir(tmpl.c_str());
-        }
+        rmdir(tmpl.c_str());
         xsink->raiseErrnoException("DBI:PGSQL:ERROR", err, "cannot set up the directory '%s' for the UNIX socket "
             "'%s'", tmpl.c_str(), path);
+        return -1;
+    }
+    // the directory opened is the one created: a directory of this user that nobody else can use (mkdtemp() creates
+    // it with the mode 0700 less the umask, which is set to 0700 here); its link count is not checked, as some file
+    // systems (btrfs) report 1 for directories
+    struct stat dbuf;
+    if (fchmod(e->dirfd, S_IRWXU) || fstat(e->dirfd, &dbuf)) {
+        xsink->raiseErrnoException("DBI:PGSQL:ERROR", errno, "cannot set up the directory '%s' for the UNIX socket "
+            "'%s'", tmpl.c_str(), path);
+        return -1;
+    }
+    if (!S_ISDIR(dbuf.st_mode) || dbuf.st_uid != geteuid() || (dbuf.st_mode & 07777) != S_IRWXU) {
+        xsink->raiseException("DBI:PGSQL:ERROR", "cannot set up the directory '%s' for the UNIX socket '%s': it "
+            "changed after it was created", tmpl.c_str(), path);
         return -1;
     }
     std::string target = "/proc/self/fd/" + std::to_string(e->sfd);
