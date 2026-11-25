@@ -52,6 +52,28 @@ major_version * 10000 + minor_version * 100 + sub_version
     - @anchor pgsqlstoredprocs @subpage pgsqlstoredprocsguide
     - @anchor pgsqlreleasenotes @subpage pgsqlreleasenotesguide
 
+    @section pgsqlnotifications Receiving PostgreSQL notifications
+
+    Create a @ref Qore::PGSQL::PgsqlNotificationListener "PgsqlNotificationListener" before sending events.
+    Each listener opens a dedicated database session and subscribes to one literal, case-sensitive channel.
+    A second connection can publish to that channel using bound parameters. PostgreSQL delivers the event
+    when the sending transaction commits.
+
+    @code{.py}
+PgsqlNotificationListener listener(connstr, "orders");
+Datasource sender(connstr);
+sender.exec("select 1 from pg_catalog.pg_notify(%v, %v)", "orders", "updated");
+sender.commit();
+*hash<auto> event = listener.receive(5000);
+if (exists event) {
+    printf("%s from backend %d: %s\n", event.channel, event.pid, event.payload);
+}
+    @endcode
+
+    The timeout is in milliseconds. An omitted or zero timeout polls immediately, and -1 waits indefinitely.
+    A timeout returns NOTHING. A lost connection raises an exception. Create a new listener to subscribe
+    again, or to receive events in a forked child. Events sent during a gap in the subscription cannot be replayed.
+
     @section pgsqlsandbox Sandboxing
 
     In a %Qore version that checks DBI connections against the sandbox, a connection opened by code governed by a

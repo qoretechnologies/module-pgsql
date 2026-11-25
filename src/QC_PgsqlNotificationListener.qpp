@@ -1,0 +1,229 @@
+/* -*- mode: c++; indent-tabs-mode: nil -*- */
+// Copyright 2026 Qore Technologies, s.r.o.
+// SPDX-License-Identifier: LGPL-2.1-or-later OR MIT
+
+#include "pgsql.h"
+#include "QorePGConnection.h"
+
+#include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#ifndef _WIN32
+#include <poll.h>
+#include <unistd.h>
+#endif
+
+class PgsqlListenerData : public AbstractPrivateData {
+public:
+    std::unique_ptr<Datasource> ds;
+    std::mutex reader;
+    const int64 pid = getpid();
+
+    bool open(const QoreStringNode* description, const QoreStringNode* channel, ExceptionSink* xsink) {
+        TempEncodingHelper desc(description, QCS_DEFAULT, xsink);
+        if (*xsink) {
+            return false;
+        }
+        if (memchr(desc->c_str(), 0, desc->size())) {
+            xsink->raiseException("PGSQL-LISTENER-ERROR", "invalid datasource string");
+            return false;
+        }
+        ReferenceHolder<QoreHashNode> cfg(parseDatasource(desc->c_str(), xsink), xsink);
+        if (!cfg) {
+            return false;
+        }
+        auto type = cfg->getKeyValue("type").get<const QoreStringNode>();
+        if (!type || !type->equal("pgsql")) {
+            xsink->raiseException("PGSQL-LISTENER-ERROR", "a pgsql datasource is required");
+            return false;
+        }
+        DBIDriver* driver = DBI.find("pgsql", xsink);
+        if (!driver) {
+            return false;
+        }
+        ds.reset(new Datasource(driver));
+        auto set = [&](const char* key, void (Datasource::*setter)(const char*)) {
+            if (auto value = cfg->getKeyValue(key).get<const QoreStringNode>()) {
+                (ds.get()->*setter)(value->c_str());
+            }
+        };
+        set("db", &Datasource::setPendingDBName);
+        set("user", &Datasource::setPendingUsername);
+        set("pass", &Datasource::setPendingPassword);
+        set("host", &Datasource::setPendingHostName);
+        set("charset", &Datasource::setPendingDBEncoding);
+        ds->setPendingPort(cfg->getKeyValue("port").getAsBigInt());
+        if (auto opts = cfg->getKeyValue("options").get<const QoreHashNode>()) {
+            ConstHashIterator i(opts);
+            while (i.next()) {
+                if (!strcmp(i.getKey(), "min") || !strcmp(i.getKey(), "max")) {
+                    continue; // pool sizes do not apply to a dedicated connection
+                }
+                if (ds->setOption(i.getKey(), i.get(), xsink)) {
+                    return false;
+                }
+            }
+        }
+        if (ds->open(xsink)) {
+            return false;
+        }
+        TempEncodingHelper name(channel, ds->getQoreEncoding(), xsink);
+        if (*xsink) {
+            return false;
+        }
+        if (!name->size() || memchr(name->c_str(), 0, name->size())) {
+            xsink->raiseException("PGSQL-LISTENER-ERROR", "the channel must be a nonempty identifier without NUL");
+            return false;
+        }
+        // Let the server quote the identifier in the client's encoding and check its actual identifier limit.
+        PGconn* pc = connection();
+        const char* value = name->c_str();
+        QorePGCancelHelper cancel(pc);
+        using Result = std::unique_ptr<PGresult, decltype(&PQclear)>;
+        Result quoted(PQexecParams(pc, "select pg_catalog.quote_ident($1) where pg_catalog.octet_length($1) "
+            "<= pg_catalog.current_setting('max_identifier_length')::int", 1, nullptr, &value, nullptr, nullptr, 0),
+            PQclear);
+        if (PQresultStatus(quoted.get()) != PGRES_TUPLES_OK) {
+            xsink->raiseException("PGSQL-LISTENER-ERROR", "cannot prepare LISTEN: %s", PQerrorMessage(pc));
+            return false;
+        }
+        if (!PQntuples(quoted.get())) {
+            xsink->raiseException("PGSQL-LISTENER-ERROR", "channel exceeds the PostgreSQL identifier length limit");
+            return false;
+        }
+        std::string sql = std::string("LISTEN ") + PQgetvalue(quoted.get(), 0, 0);
+        Result result(PQexec(pc, sql.c_str()), PQclear);
+        if (PQresultStatus(result.get()) != PGRES_COMMAND_OK) {
+            xsink->raiseException("PGSQL-LISTENER-ERROR", "LISTEN failed: %s", PQerrorMessage(pc));
+            return false;
+        }
+        return true;
+    }
+
+    QoreHashNode* receive(int64 timeout, ExceptionSink* xsink) {
+        if (pid != getpid()) {
+            xsink->raiseException("PGSQL-LISTENER-ERROR", "create a new listener after fork");
+            return nullptr;
+        }
+        if (timeout < -1 || timeout > INT_MAX) {
+            xsink->raiseException("PGSQL-LISTENER-ERROR", "timeout must be -1 or 0 through %d milliseconds", INT_MAX);
+            return nullptr;
+        }
+        std::unique_lock<std::mutex> lock(reader, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            xsink->raiseException("PGSQL-LISTENER-ERROR", "another thread is already receiving on this listener");
+            return nullptr;
+        }
+        PGconn* pc = connection();
+        int64 deadline = q_clock_getmicros_monotonic() / 1000 + timeout;
+        bool checked_socket = false;
+        for (;;) {
+            if (qore_check_cancel(xsink)) {
+                return nullptr;
+            }
+            std::unique_ptr<PGnotify, decltype(&PQfreemem)> event(PQnotifies(pc), PQfreemem);
+            if (event) {
+                ReferenceHolder<QoreHashNode> row(new QoreHashNode(autoTypeInfo), xsink);
+                const QoreEncoding* enc = ds->getQoreEncoding();
+                row->setKeyValue("channel", new QoreStringNode(event->relname, enc), xsink);
+                row->setKeyValue("payload", new QoreStringNode(event->extra, enc), xsink);
+                row->setKeyValue("pid", event->be_pid, xsink);
+                return row.release();
+            }
+            if (PQsocket(pc) < 0 || PQstatus(pc) != CONNECTION_OK) {
+                xsink->raiseException("PGSQL-LISTENER-ERROR", "listener connection lost: %s", PQerrorMessage(pc));
+                return nullptr;
+            }
+            int64 remaining = deadline - q_clock_getmicros_monotonic() / 1000;
+            if (checked_socket && timeout >= 0 && remaining <= 0) {
+                return nullptr;
+            }
+            int wait = timeout < 0 ? -1 : static_cast<int>(std::max<int64>(0, remaining));
+            struct pollfd fd{PQsocket(pc), POLLIN, 0};
+#ifdef _QORE_HAS_CANCELLABLE_POLL
+            int rc = qore_cancellable_poll(&fd, 1, wait, xsink, "waiting for a PostgreSQL notification");
+            if (*xsink) {
+                return nullptr;
+            }
+#else
+            // Check for thread cancellation periodically on SDKs without cancellable poll.
+            wait = wait < 0 ? 100 : std::min(wait, 100);
+#ifdef _WIN32
+            int rc = WSAPoll(&fd, 1, wait);
+#else
+            int rc = poll(&fd, 1, wait);
+#endif
+#endif
+            if (!rc) {
+                checked_socket = true;
+                continue;
+            }
+            if (rc < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                xsink->raiseErrnoException("PGSQL-LISTENER-ERROR", errno, "waiting for PostgreSQL notification");
+                return nullptr;
+            }
+            checked_socket = true;
+            if (!PQconsumeInput(pc) || (fd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+                xsink->raiseException("PGSQL-LISTENER-ERROR", "listener connection lost: %s", PQerrorMessage(pc));
+                return nullptr;
+            }
+            // Input can contain notices or a partial message. Keep the original deadline.
+        }
+    }
+
+private:
+    PGconn* connection() const {
+        return ds->getPrivateData<QorePGConnection>()->get();
+    }
+};
+
+//! Receives PostgreSQL LISTEN/NOTIFY events on a dedicated, session-scoped subscription
+/** Construction opens an ordinary pgsql driver connection and commits the subscription before returning.
+    Notifications are live events. If the connection is lost, receive() raises an exception and a new
+    listener is required. Destroy the listener to close its connection and unsubscribe.
+
+    @code{.py}
+PgsqlNotificationListener listener(connstr, "orders");
+# Another session calls pg_notify('orders', 'updated') and commits.
+*hash<auto> event = listener.receive(5000);
+    @endcode
+*/
+qclass PgsqlNotificationListener [dom=DATABASE; arg=PgsqlListenerData* priv; ns=Qore::PGSQL];
+
+//! Opens a dedicated session and listens for the literal, case-sensitive channel name
+/** @param datasource a pgsql datasource string
+    @param channel a channel name in the database's identifier length limit
+*/
+PgsqlNotificationListener::constructor(string datasource, string channel) {
+    ReferenceHolder<PgsqlListenerData> listener(new PgsqlListenerData, xsink);
+    if (listener->open(datasource, channel, xsink)) {
+        self->setPrivate(CID_PGSQLNOTIFICATIONLISTENER, listener.release());
+    }
+}
+
+//! Reads one notification, or returns NOTHING when the timeout expires
+/** @param timeout_ms milliseconds to wait, 0 to poll (default), or -1 to wait indefinitely
+    @return a hash with the string \c channel and \c payload and the integer \c pid of the sending backend.
+    Notifications already received by libpq are delivered first, in order. Only one thread can receive at a time.
+*/
+*hash<auto> PgsqlNotificationListener::receive(int timeout_ms = 0) {
+    return priv->receive(timeout_ms, xsink);
+}
+
+//! A subscription belongs to one session and cannot be copied
+/** */
+PgsqlNotificationListener::copy() {
+    xsink->raiseException("PGSQL-LISTENER-ERROR", "a notification listener cannot be copied");
+}
+
+//! Releases the dedicated session and its subscription
+/** */
+PgsqlNotificationListener::destructor() {
+    priv->deref(xsink);
+}

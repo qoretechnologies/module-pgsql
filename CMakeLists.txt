@@ -61,7 +61,7 @@ check_cxx_compiler_flag(-fvisibility=hidden HAVE_GCC_VISIBILITY)
 configure_file(${CMAKE_SOURCE_DIR}/cmake/config.h.cmake
                ${CMAKE_BINARY_DIR}/config.h)
 
-set(QPP_SRC src/ql_pgsql.qpp)
+set(QPP_SRC src/ql_pgsql.qpp src/QC_PgsqlNotificationListener.qpp)
 
 set(CPP_SRC
     src/pgsql.cpp

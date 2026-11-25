@@ -44,6 +44,7 @@
 #include <string>
 #include <vector>
 
+QoreClass* initPgsqlNotificationListenerClass(QoreNamespace& ns);
 void init_pgsql_functions(QoreNamespace& ns);
 void init_pgsql_constants(QoreNamespace& ns);
 
@@ -52,7 +53,7 @@ static void pgsql_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, Excepti
 static void pgsql_module_delete();
 
 // the module's namespace; purged when the module is deleted (see QoreModuleInfo::ns)
-static QoreNamespace pgsql_ns("PGSQL");
+static QoreNamespace pgsql_ns("Qore::PGSQL");
 
 extern "C" DLLEXPORT void pgsql_qore_module_desc(QoreModuleInfo& mod_info) {
     mod_info.name = "pgsql";
@@ -784,6 +785,7 @@ static void pgsql_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) 
     }
 #endif
 
+    pgsql_ns.addSystemClass(initPgsqlNotificationListenerClass(pgsql_ns));
     init_pgsql_functions(pgsql_ns);
     init_pgsql_constants(pgsql_ns);
 

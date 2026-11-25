@@ -5,6 +5,7 @@
     @tableofcontents
 
     @section pgsql35 pgsql Driver Version 3.5
+    - @ref Qore::PGSQL::PgsqlNotificationListener "PgsqlNotificationListener" receives @ref pgsqlnotifications "PostgreSQL notifications" on a dedicated session
     - \c MONEY values are returned as exact \c number values in the currency of the session: they were read as
       4-byte values in cents, so most were returned as \c 0.0 or as wrong \c float values, and an \c int, \c float or
       \c number value bound with <tt>pgsql_bind(PG_TYPE_CASH, value)</tt> is bound in the binary format of money,
