@@ -75,7 +75,9 @@ class PgsqlSandboxTest inherits QUnit::Test {
         addTestCase("a timed-out host is skipped within the checked addresses", \testTimeoutRestart());
         addTestCase("a UNIX socket is connected to in the directory checked", \testPinnedSocket());
         addTestCase("a socket directory replaced after the check is not used", \testPinnedSocketSwap());
-        addTestCase("a socket that is a link to another name is refused", \testPinnedSocketLeafLink());
+        addTestCase("a socket that is a link to another name is connected to through the link", \testPinnedSocketLeafLink());
+        addTestCase("a socket replaced by a link after the check is not used", \testPinnedSocketLeafSwap());
+        addTestCase("a pinned socket leaves no private directory", \testPinnedSocketCleanup());
         set_return_value(main());
     }
 
@@ -501,14 +503,34 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
         } catch (hash<ExceptionInfo> ex) {
             testSkip("the test database cannot be reached by its UNIX socket: " + ex.err);
         }
-        # the error of a connection to a socket that does not exist names the socket that libpq used
+        skipUnlessPinned();
+        return {"c": c, "dir": dir, "socket": "/.s.PGSQL." + port};
+    }
+
+    #! skips the case if the module does not connect through pinned sockets
+    /** A pinned socket is opened before the connection: a file that is not a socket is refused then, with an error
+        of the driver, and not by libpq
+    */
+    skipUnlessPinned() {
+        if (PlatformOS != "Linux") {
+            testSkip("UNIX sockets are reached through their pinned paths on Linux only");
+        }
         TmpDir probe("pgsql-pin-probe");
+        File f();
+        f.open2(probe.path + "/.s.PGSQL.6000", O_CREAT | O_WRONLY | O_TRUNC);
+        f.close();
         SandboxManager sm = socketSandbox(probe.path, ());
         string err = sandboxed(sm).callFunction("connect_error", dummy({"host": probe.path, "port": 6000}));
-        if (err !~ /\/proc\/self\/fd\/[0-9]+\/\.s\.PGSQL\.6000/) {
-            testSkip("this module does not connect through pinned socket directories: " + err);
+        if (err !~ /is not a UNIX socket/) {
+            testSkip("this module does not connect through pinned sockets: " + err);
         }
-        return {"c": c, "dir": dir, "socket": "/.s.PGSQL." + port};
+    }
+
+    #! returns the private directories of pinned sockets in the temporary directory
+    static list<string> privateDirs() {
+        Dir d();
+        d.chdir(ENV.TMPDIR =~ /^\// ? ENV.TMPDIR : "/tmp");
+        return sort(d.listDirs("^qore-pgsql-") ?? ());
     }
 
     #! a sandbox that allows the network and only the given directory and files
@@ -570,14 +592,52 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
         TmpDir dir("pgsql-pin-leaf");
         string sockdir = dir.path + "/s";
         mkdir(sockdir);
-        # the socket name of the port is a link to the socket of the server, which has another name
+        # the socket name of the port is a link to the socket of the server, which has another name: the socket that
+        # it names is checked and connected to
         symlink(t.dir + t.socket, sockdir + "/.s.PGSQL.6001");
         Program p = sandboxed(socketSandbox(dir.path, (t.dir + t.socket,)));
-        assertEq("FILESYSTEM-ACCESS-DENIED", query(p, t.c + {"host": sockdir, "port": 6001}));
-        # a link with the same name as the socket is followed
-        string samedir = dir.path + "/same";
-        mkdir(samedir);
-        symlink(t.dir + t.socket, samedir + t.socket);
-        assertEq(NULL, query(p, t.c + {"host": samedir}), "connected by the UNIX socket");
+        assertEq(NULL, query(p, t.c + {"host": sockdir, "port": 6001}), "connected by the UNIX socket");
+        # the socket that it names is outside of the policy
+        Program pd = sandboxed(socketSandbox(dir.path, ()));
+        assertEq("FILESYSTEM-ACCESS-DENIED", query(pd, t.c + {"host": sockdir, "port": 6001}));
+    }
+
+    testPinnedSocketLeafSwap() {
+        if (!Option::HAVE_LIBRARY_DEBUGGING) {
+            testSkip("needs a Qore with library debugging");
+        }
+        skipUnlessPinned();
+        TmpDir dir("pgsql-pin-leafswap");
+        string allowed = dir.path + "/allowed";
+        string outside = dir.path + "/outside";
+        mkdir(allowed);
+        mkdir(outside);
+        # fixture sockets: the one checked, and one outside of the policy, where nothing must connect
+        Socket inside();
+        inside.bindUNIX(allowed + "/.s.PGSQL.6002");
+        inside.listen();
+        Socket fake();
+        fake.bindUNIX(outside + "/.s.PGSQL.6002");
+        fake.listen();
+        list<string> dirs = privateDirs();
+        Program p = sandboxed(socketSandbox(allowed, ()));
+
+        # the socket checked is replaced by a link to the socket outside after the check: the connection is refused
+        call_function("dbg_fs_swap_on_open", allowed + "/.s.PGSQL.6002", outside + "/.s.PGSQL.6002");
+        on_exit call_function("dbg_fs_swap_on_open", "", "");
+        assertEq("FILESYSTEM-ACCESS-DENIED", query(p, dummy({"host": allowed, "port": 6002})));
+        assertEq("SYMBOLIC-LINK", hlstat(allowed + "/.s.PGSQL.6002").type, "the socket was replaced after the check");
+        # a pending connection makes a listening socket readable; libpq has connected (or failed to) before the query
+        # returns
+        assertFalse(fake.isDataAvailable(0), "nothing connected to the socket outside of the policy");
+        assertEq(dirs, privateDirs(), "no private directory is left");
+    }
+
+    testPinnedSocketCleanup() {
+        hash<auto> t = socketParams();
+        list<string> dirs = privateDirs();
+        Program p = sandboxed(socketSandbox(t.dir, ()));
+        assertEq(NULL, query(p, t.c + {"host": t.dir}), "connected by the UNIX socket");
+        assertEq(dirs, privateDirs(), "the private directory is removed when the connection is closed");
     }
 }

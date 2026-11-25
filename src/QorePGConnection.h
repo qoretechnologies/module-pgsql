@@ -38,43 +38,35 @@
 #define PGSQL_PINNED_SOCKETS 1
 #endif
 
-//! the pinned UNIX socket directories of a connection, which libpq reaches by their procfs paths (qore#7603)
-/** They are kept for the life of the connection, as libpq connects again with the same host list (PQreset()).
+//! the pinned UNIX sockets of a connection, which libpq reaches through private directories (qore#7603)
+/** libpq connects to the socket \c .s.PGSQL.<port> in the directory that it is given; each pinned socket is
+    therefore given to it as a private directory (created with mkdtemp(), not writable once set up) whose only entry,
+    \c .s.PGSQL.<port>, is a link to the procfs path of an \c O_PATH descriptor of the socket file checked, and the
+    directory is named by the procfs path of a descriptor of it.  They are kept for the life of the connection, as
+    libpq connects again with the same host list (PQreset()).
 */
 class PgsqlPinnedSockets {
 public:
     DLLLOCAL PgsqlPinnedSockets() = default;
     DLLLOCAL PgsqlPinnedSockets(const PgsqlPinnedSockets&) = delete;
     DLLLOCAL PgsqlPinnedSockets& operator=(const PgsqlPinnedSockets&) = delete;
-    DLLLOCAL PgsqlPinnedSockets(PgsqlPinnedSockets&& old) noexcept : pins(std::move(old.pins)) {
-        old.pins.clear();
+    DLLLOCAL PgsqlPinnedSockets(PgsqlPinnedSockets&& old) noexcept : entries(std::move(old.entries)) {
+        old.entries.clear();
     }
 
-    DLLLOCAL ~PgsqlPinnedSockets() {
-#ifdef PGSQL_PINNED_SOCKETS
-        for (QoreDbiPinnedPath* pin : pins) {
-            qore_dbi_pinned_path_free(pin);
-        }
-#endif
-    }
+    DLLLOCAL ~PgsqlPinnedSockets();
 
 #ifdef PGSQL_PINNED_SOCKETS
-    //! takes ownership of a pinned path
-    DLLLOCAL void add(QoreDbiPinnedPath* pin) {
-        try {
-            pins.push_back(pin);
-        } catch (...) {
-            qore_dbi_pinned_path_free(pin);
-            throw;
-        }
-    }
+    //! pins the checked socket \a path for libpq's \a port and returns the directory to give libpq in \a host
+    /** @return 0 for success, -1 if an exception was raised
+    */
+    DLLLOCAL int add(Datasource* ds, const char* path, const std::string& port, std::string& host,
+            ExceptionSink* xsink);
+#endif
 
 private:
-    std::vector<QoreDbiPinnedPath*> pins;
-#else
-private:
-    std::vector<void*> pins;
-#endif
+    struct Entry;
+    std::vector<Entry*> entries;
 };
 
 typedef std::vector<std::string> strvec_t;

@@ -533,25 +533,14 @@ static int pgsql_checked_conninfo(Datasource* ds, const QoreListNode* checked, Q
                 return -1;
             }
 #ifdef PGSQL_PINNED_SOCKETS
-            // the socket is pinned: libpq connects to it in the directory checked, whatever its path names after the
+            // the socket is pinned and connected to through a private directory, whatever its path names after the
             // check (qore#7603)
-            QoreDbiPinnedPath* pin = qore_dbi_pin_connect_path(ds, path.get<const QoreStringNode>()->c_str(),
-                QSEC_READ | QSEC_WRITE, xsink);
-            if (!pin) {
-                return -1;
-            }
-            pinned.add(pin);
-            int dirfd = qore_dbi_pinned_path_dirfd(pin);
-            if (dirfd != AT_FDCWD) {
-                // libpq connects to the socket of its port in the directory that it is given
-                std::string leaf = ".s.PGSQL." + t.port;
-                if (leaf != qore_dbi_pinned_path_leaf(pin)) {
-                    xsink->raiseException("FILESYSTEM-ACCESS-DENIED", "the PostgreSQL UNIX socket '%s' is a link to "
-                        "a socket of another name, which a connection that a sandbox restricts cannot use",
-                        path.get<const QoreStringNode>()->c_str());
+            {
+                std::string host;
+                if (pinned.add(ds, path.get<const QoreStringNode>()->c_str(), t.port, host, xsink)) {
                     return -1;
                 }
-                add("/proc/self/fd/" + std::to_string(dirfd), "", t.port);
+                add(host, "", t.port);
                 continue;
             }
 #endif
