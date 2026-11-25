@@ -389,7 +389,10 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
         assertEq("FILESYSTEM-ACCESS-DENIED", query(sandboxed(deny_socket), dummy()));
         SandboxManager deny_other = denyTestNet();
         deny_other.addFilesystemDeniedPath(path + "0");
-        assertEq("DBI:PGSQL:ERROR", query(sandboxed(deny_other), dummy()));
+        # the check passes; libpq finds no socket in the directory, or, where the directory does not exist (no
+        # PostgreSQL server on this system), the socket cannot be pinned in it
+        assertEq(is_dir(dirname(path)) ? "DBI:PGSQL:ERROR" : "DATASOURCE-PATH-ERROR",
+            query(sandboxed(deny_other), dummy()));
         # a port with white space names the same socket, as in libpq
         setenv("PGPORT", " 1 ");
         assertEq("FILESYSTEM-ACCESS-DENIED", query(sandboxed(deny_socket), dummy()));
