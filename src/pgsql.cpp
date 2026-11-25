@@ -38,6 +38,7 @@
 #include <memory>
 #include <mutex>
 
+#include <fcntl.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <string>
@@ -492,7 +493,7 @@ static QoreListNode* pgsql_get_connect_targets(Datasource* ds, ExceptionSink* xs
     @return 0 for success, -1 if an exception was raised
 */
 static int pgsql_checked_conninfo(Datasource* ds, const QoreListNode* checked, QoreString& lstr,
-        ExceptionSink* xsink) {
+        PgsqlPinnedSockets& pinned, ExceptionSink* xsink) {
     std::vector<PgsqlTarget> targets;
     if (pgsql_get_targets(ds, targets, xsink)) {
         return -1;
@@ -531,6 +532,29 @@ static int pgsql_checked_conninfo(Datasource* ds, const QoreListNode* checked, Q
                     "changed after they were checked against the sandbox");
                 return -1;
             }
+#ifdef PGSQL_PINNED_SOCKETS
+            // the socket is pinned: libpq connects to it in the directory checked, whatever its path names after the
+            // check (qore#7603)
+            QoreDbiPinnedPath* pin = qore_dbi_pin_connect_path(ds, path.get<const QoreStringNode>()->c_str(),
+                QSEC_READ | QSEC_WRITE, xsink);
+            if (!pin) {
+                return -1;
+            }
+            pinned.add(pin);
+            int dirfd = qore_dbi_pinned_path_dirfd(pin);
+            if (dirfd != AT_FDCWD) {
+                // libpq connects to the socket of its port in the directory that it is given
+                std::string leaf = ".s.PGSQL." + t.port;
+                if (leaf != qore_dbi_pinned_path_leaf(pin)) {
+                    xsink->raiseException("FILESYSTEM-ACCESS-DENIED", "the PostgreSQL UNIX socket '%s' is a link to "
+                        "a socket of another name, which a connection that a sandbox restricts cannot use",
+                        path.get<const QoreStringNode>()->c_str());
+                    return -1;
+                }
+                add("/proc/self/fd/" + std::to_string(dirfd), "", t.port);
+                continue;
+            }
+#endif
             add(t.host, "", t.port);
             continue;
         }
@@ -568,11 +592,12 @@ static int qore_pgsql_open(Datasource* ds, ExceptionSink* xsink) {
 
     // string for connection arguments
     QoreString lstr;
+    PgsqlPinnedSockets pinned;
 #ifdef QDBI_METHOD_GET_CONNECT_TARGETS
     // a connection checked against a sandbox connects to the checked addresses only
     if (const QoreListNode* checked = ds->getCheckedConnectTargets()) {
         pgsql_conninfo(ds, lstr, false);
-        if (pgsql_checked_conninfo(ds, checked, lstr, xsink)) {
+        if (pgsql_checked_conninfo(ds, checked, lstr, pinned, xsink)) {
             return -1;
         }
     } else {
@@ -595,7 +620,7 @@ static int qore_pgsql_open(Datasource* ds, ExceptionSink* xsink) {
         ds->setQoreEncoding(QCS_DEFAULT);
     }
 
-    QorePGConnection* pc = new QorePGConnection(ds, lstr.c_str(), xsink);
+    QorePGConnection* pc = new QorePGConnection(ds, lstr.c_str(), xsink, std::move(pinned));
 
     if (*xsink) {
         delete pc;

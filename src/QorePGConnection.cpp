@@ -3823,8 +3823,9 @@ static bool pgsql_libpq_has_tcp_user_timeout() {
 #endif
 }
 
-QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink *xsink)
-        : ds(d), pc(nullptr), server_tz(currentTZ()),
+QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink *xsink,
+        PgsqlPinnedSockets&& pinned)
+        : ds(d), pinned(std::move(pinned)), pc(nullptr), server_tz(currentTZ()),
             server_desc("%s:", d->getDriverName()),
             interval_has_day(false),
             integer_datetimes(false),

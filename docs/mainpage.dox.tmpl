@@ -73,6 +73,12 @@ major_version * 10000 + minor_version * 100 + sub_version
     redirect it, while TLS host name verification, \c .pgpass and GSSAPI still use the host name.  A host name with
     several addresses therefore has more weight with \c load_balance_hosts=random.
 
+    On Linux, with a %Qore version that pins the local path of a connection (\c QORE_HAS_DBI_PIN_CONNECT_PATH), a
+    UNIX socket that was checked is connected to in the directory that was checked, whatever its path names after
+    the check: libpq is given the directory as a \c /proc/self/fd/ path (which therefore appears in its error
+    messages, and which \c .pgpass entries for the socket directory do not match).  A socket name that is a symbolic
+    link to a socket of another name is refused with \c FILESYSTEM-ACCESS-DENIED.
+
     Pinning the connection needs libpq 12 or later; with an older libpq, code governed by a sandbox that restricts
     the network or the filesystem cannot open a connection.
 

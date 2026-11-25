@@ -73,6 +73,9 @@ class PgsqlSandboxTest inherits QUnit::Test {
         addTestCase("an allowed TCP connection is made to the checked address", \testAllowedTcp());
         addTestCase("a reconnect stays on the checked address", \testReconnect());
         addTestCase("a timed-out host is skipped within the checked addresses", \testTimeoutRestart());
+        addTestCase("a UNIX socket is connected to in the directory checked", \testPinnedSocket());
+        addTestCase("a socket directory replaced after the check is not used", \testPinnedSocketSwap());
+        addTestCase("a socket that is a link to another name is refused", \testPinnedSocketLeafLink());
         set_return_value(main());
     }
 
@@ -128,6 +131,18 @@ auto sub query(hash<auto> c) {
     ds.open();
     on_exit ds.close();
     return ds.selectRow(\"select inet_server_addr()::text as addr\").addr;
+}
+
+# returns the description of the error of a connection
+string sub connect_error(hash<auto> c) {
+    try {
+        Datasource ds(c);
+        ds.open();
+        ds.close();
+    } catch (hash<ExceptionInfo> ex) {
+        return ex.err + \": \" + ex.desc;
+    }
+    return \"connected\";
 }
 
 # reports the backend PID to 'pids', waits for 'go', then queries again on the same connection
@@ -453,5 +468,116 @@ hash<auto> sub reconnect(hash<auto> c, Queue pids, Queue go) {
             "options": (t.c.options ?? {}) + {"connect-timeout": 3},
         };
         checkAddress(t, query(sandboxed(denyTestNet()), c), "connected to a checked address of the second host");
+    }
+    #! returns the parameters of the test database by its UNIX socket and the socket directory, or skips the case
+    /** Also skips if the module does not connect through pinned socket directories (a Qore without
+        QORE_HAS_DBI_PIN_CONNECT_PATH, or not Linux): libpq then names the socket by the directory given
+    */
+    hash<auto> socketParams() {
+        if (PlatformOS != "Linux") {
+            testSkip("UNIX sockets are reached through their pinned directories on Linux only");
+        }
+        hash<auto> c = params();
+        int port = c.port ?? DefaultPort;
+        # a socket directory given as the host of QORE_DB_CONNSTR_PGSQL, or in PGHOST, or a common default
+        list<string> dirs = (c.host =~ /^\//) ? (c.host,) : ((ENV.PGHOST =~ /^\//) ? (ENV.PGHOST,)
+            : ("/var/run/postgresql", "/tmp"));
+        c -= "host";
+        *string dir;
+        foreach string d in (dirs) {
+            if (hstat(d + "/.s.PGSQL." + port).type == "SOCKET") {
+                dir = realpath(d);
+                break;
+            }
+        }
+        if (!dir) {
+            testSkip("no PostgreSQL UNIX socket found");
+        }
+        c.host = dir;
+        try {
+            Datasource ds(c);
+            ds.open();
+            ds.close();
+        } catch (hash<ExceptionInfo> ex) {
+            testSkip("the test database cannot be reached by its UNIX socket: " + ex.err);
+        }
+        # the error of a connection to a socket that does not exist names the socket that libpq used
+        TmpDir probe("pgsql-pin-probe");
+        SandboxManager sm = socketSandbox(probe.path, ());
+        string err = sandboxed(sm).callFunction("connect_error", dummy({"host": probe.path, "port": 6000}));
+        if (err !~ /\/proc\/self\/fd\/[0-9]+\/\.s\.PGSQL\.6000/) {
+            testSkip("this module does not connect through pinned socket directories: " + err);
+        }
+        return {"c": c, "dir": dir, "socket": "/.s.PGSQL." + port};
+    }
+
+    #! a sandbox that allows the network and only the given directory and files
+    static SandboxManager socketSandbox(string allowed, list<string> files) {
+        SandboxManager sm();
+        sm.setNetworkDefaultPolicy(True);
+        sm.setFilesystemDefaultPolicy(False);
+        sm.addFilesystemAllowedPath(allowed, QSEC_READ | QSEC_WRITE);
+        map sm.addFilesystemAllowedPath($1, QSEC_READ | QSEC_WRITE), files;
+        return sm;
+    }
+
+    testPinnedSocket() {
+        hash<auto> t = socketParams();
+        TmpDir dir("pgsql-pin");
+        string link = dir.path + "/l";
+        symlink(t.dir, link);
+        Program p = sandboxed(socketSandbox(dir.path, (t.dir + t.socket,)));
+        # a UNIX socket connection reports no server address (SQL NULL)
+        assertEq(NULL, query(p, t.c + {"host": link}), "connected by the UNIX socket");
+        assertEq(NULL, query(p, t.c), "connected by the UNIX socket");
+        # the socket outside of the policy is denied
+        Program pd = sandboxed(socketSandbox(dir.path, ()));
+        assertEq("FILESYSTEM-ACCESS-DENIED", query(pd, t.c + {"host": link}));
+    }
+
+    testPinnedSocketSwap() {
+        if (!Option::HAVE_LIBRARY_DEBUGGING) {
+            testSkip("needs a Qore with library debugging");
+        }
+        hash<auto> t = socketParams();
+        TmpDir dir("pgsql-pin-swap");
+        string allowed = dir.path + "/allowed";
+        string outside = dir.path + "/outside";
+        mkdir(allowed);
+        mkdir(outside);
+        string link = allowed + "/l";
+        symlink(t.dir, link);
+        # a socket outside of the policy, where nothing must connect
+        Socket fake();
+        fake.bindUNIX(outside + t.socket);
+        fake.listen();
+        Program p = sandboxed(socketSandbox(allowed, (t.dir + t.socket,)));
+
+        # the link to the socket directory checked is replaced by one to the directory outside after the check: the
+        # connection is made to the socket checked
+        call_function("dbg_fs_swap_on_open", link + "/*", outside);
+        on_exit call_function("dbg_fs_swap_on_open", "", "");
+        assertEq(NULL, query(p, t.c + {"host": link, "options": {"connect-timeout": 5}}),
+            "connected by the UNIX socket checked");
+        assertEq(outside, readlink(link), "the link was replaced after the check");
+        # a pending connection makes a listening socket readable; libpq has connected (or failed to) before the query
+        # returns
+        assertFalse(fake.isDataAvailable(0), "nothing connected to the socket outside of the policy");
+    }
+
+    testPinnedSocketLeafLink() {
+        hash<auto> t = socketParams();
+        TmpDir dir("pgsql-pin-leaf");
+        string sockdir = dir.path + "/s";
+        mkdir(sockdir);
+        # the socket name of the port is a link to the socket of the server, which has another name
+        symlink(t.dir + t.socket, sockdir + "/.s.PGSQL.6001");
+        Program p = sandboxed(socketSandbox(dir.path, (t.dir + t.socket,)));
+        assertEq("FILESYSTEM-ACCESS-DENIED", query(p, t.c + {"host": sockdir, "port": 6001}));
+        # a link with the same name as the socket is followed
+        string samedir = dir.path + "/same";
+        mkdir(samedir);
+        symlink(t.dir + t.socket, samedir + t.socket);
+        assertEq(NULL, query(p, t.c + {"host": samedir}), "connected by the UNIX socket");
     }
 }

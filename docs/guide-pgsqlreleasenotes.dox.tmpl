@@ -13,6 +13,8 @@
     - in a %Qore version that checks DBI connections against the sandbox, the driver reports every destination of a
       connection, including the ones that libpq takes from its environment and defaults, and connects to the checked
       addresses only (see @ref pgsqlsandbox)
+    - on Linux, with a %Qore version that pins the local path of a connection, a UNIX socket that was checked against
+      the sandbox is connected to in the directory that was checked (see @ref pgsqlsandbox)
     - the user name, password, database and host of a connection are quoted correctly: a value with a quote or a
       backslash could not be used, and could add connection keywords of its own
     - a write that a hot standby refuses (\c SQLSTATE 25006, a read-only transaction) now reconnects the
