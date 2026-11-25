@@ -2,3 +2,4 @@
 #include "QorePGMapper.cpp"
 #include "pgsql.cpp"
 #include "ql_pgsql.cpp"
+#include "QC_PgsqlNotificationListener.cpp"

@@ -1,0 +1,117 @@
+#!/usr/bin/env qore
+# Copyright 2026 Qore Technologies, s.r.o. SPDX-License-Identifier: MIT
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../build"
+%requires pgsql
+%requires QUnit
+%exec-class PgsqlNotificationTest
+
+class PgsqlNotificationTest inherits QUnit::Test {
+    private {
+        string connstr = ENV.QORE_DB_CONNSTR_PGSQL ?? "";
+    }
+    constructor() : Test("PostgreSQL notification listener", "1.0", \ARGV) {
+        addTestCase("committed events on a literal channel", \eventTest());
+        addTestCase("bounded wait, invalid arguments and a delayed sender", \waitTest());
+        addTestCase("blocked receive can be cancelled", \cancelTest());
+        addTestCase("disconnect ends the subscription", \disconnectTest());
+        set_return_value(main());
+    }
+
+    private string channel() {
+        if (!connstr) {
+            testSkip("set QORE_DB_CONNSTR_PGSQL to test the PostgreSQL notification listener");
+        }
+        return sprintf("Qore \"notify\" %d", getpid());
+    }
+
+    eventTest() {
+        string ch = channel();
+        PgsqlNotificationListener listener(connstr, ch);
+        Datasource sender(connstr);
+        on_exit sender.close();
+        sender.beginTransaction();
+        int pid = sender.selectRow("select pg_backend_pid() as pid").pid;
+        sender.exec("select 1 from pg_catalog.pg_notify(%v, %v)", ch, "Příliš žlutý");
+        sender.exec("select 1 from pg_catalog.pg_notify(%v, %v)", ch, "");
+        assertNothing(listener.receive(), "uncommitted notifications are invisible");
+        sender.commit();
+        assertEq({"channel": ch, "payload": "Příliš žlutý", "pid": pid}, listener.receive(3000));
+        assertEq({"channel": ch, "payload": "", "pid": pid}, listener.receive());
+        sender.beginTransaction();
+        sender.exec("select 1 from pg_catalog.pg_notify(%v, %v)", ch, "rolled back");
+        sender.rollback();
+        sender.exec("select 1 from pg_catalog.pg_notify(%v, %v)", ch.lwr(), "different channel");
+        sender.commit();
+        assertNothing(listener.receive(40));
+    }
+
+    waitTest() {
+        string ch = channel();
+        PgsqlNotificationListener listener(connstr, ch);
+        assertThrows("PGSQL-LISTENER-ERROR", \listener.receive(), -2);
+        assertThrows("PGSQL-LISTENER-ERROR", sub () { new PgsqlNotificationListener(connstr, ""); });
+        assertThrows("PGSQL-LISTENER-ERROR", sub () { new PgsqlNotificationListener(connstr, strmul("x", 1000)); });
+        int start = clock_get_monotonic_us();
+        assertNothing(listener.receive(50));
+        assertTrue(clock_get_monotonic_us() - start >= 40000, "a bounded wait waits for the timeout");
+        Counter sending(1);
+        background sub () {
+            on_exit sending.dec();
+            Datasource sender(connstr);
+            on_exit sender.close();
+            usleep(50000);
+            sender.exec("select 1 from pg_catalog.pg_notify(%v, %v)", ch, "delayed");
+            sender.commit();
+        }();
+        on_exit sending.waitForZero();
+        assertEq("delayed", listener.receive(3000).payload);
+    }
+
+    cancelTest() {
+        PgsqlNotificationListener listener(connstr, channel());
+        Queue started();
+        Queue done();
+        int tid = background sub () {
+            try {
+                started.push(True);
+                listener.receive(8000);
+                done.push("timeout");
+            } catch (hash<ExceptionInfo> ex) {
+                done.push(ex.err);
+            }
+        }();
+        started.get(5s);
+        # Observe that the other thread owns the reader before cancelling it.
+        bool receiving = False;
+        int deadline = clock_get_monotonic_us() + 3000000;
+        while (!receiving && clock_get_monotonic_us() < deadline) {
+            try {
+                listener.receive();
+            } catch (hash<ExceptionInfo> ex) {
+                receiving = ex.err == "PGSQL-LISTENER-ERROR";
+            }
+            if (!receiving) {
+                usleep(1000);
+            }
+        }
+        cancel_thread(tid, "notification receive test");
+        assertEq("THREAD-CANCELLED", done.get(5s));
+        assertTrue(receiving);
+        assertNothing(listener.receive(), "the reader is released after cancellation");
+    }
+
+    disconnectTest() {
+        string ch = channel();
+        PgsqlNotificationListener listener(connstr, ch);
+        Datasource sender(connstr);
+        on_exit sender.close();
+        hash<auto> backend = sender.selectRow("select pid from pg_catalog.pg_stat_activity "
+            "where datname = current_database() and usename = current_user and query = "
+            "('LISTEN ' || pg_catalog.quote_ident(%v))", ch);
+        assertTrue(backend.pid > 0);
+        assertTrue(sender.selectRow("select pg_catalog.pg_terminate_backend(%v) as ended", backend.pid).ended);
+        assertThrows("PGSQL-LISTENER-ERROR", \listener.receive(), 3000);
+        assertThrows("PGSQL-LISTENER-ERROR", \listener.receive(), 0);
+    }
+}
