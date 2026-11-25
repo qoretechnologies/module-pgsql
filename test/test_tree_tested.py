@@ -322,23 +322,19 @@ class TreeTestedTest(unittest.TestCase):
         args = json.loads(capture.read_text()) if capture.exists() else None
         return result.stdout, args
 
-    def test_skip_publishes_success_and_exits_before_work(self):
+    def test_skip_exits_without_publishing_the_required_status(self):
         for shell in ("sh", "bash"):
             with self.subTest(shell=shell):
                 output, args = self.run_skip(self.skip_env(), shell)
                 self.assertNotIn("FULL_JOB", output)
-                self.assertIn(f"https://api.github.com/repos/qoretechnologies/module-pgsql/statuses/{self.head}", args)
-                body = json.loads(args[args.index("-d") + 1])
-                self.assertEqual("success", body["state"])
-                self.assertEqual("module-pgsql", body["context"])
-                self.assertEqual("https://git.example.invalid/mirror/module-pgsql/-/pipelines/100", body["target_url"])
+                self.assertIsNone(args)
 
     def test_skip_requires_valid_matching_evidence(self):
         for patch in ({"QORE_TREE_TESTED_CHECKED": ""}, {"QORE_TREE_TESTED_IN": ""},
                       {"QORE_TREE_TESTED_IN": "0"}, {"QORE_TREE_TESTED_IN": "100\ninjected"},
                       {"QORE_TREE_TESTED_IN": "200"}, {"QORE_TREE_TESTED_SHA": "abc"},
                       {"QORE_TREE_TESTED_SHA": "g" * 40}, {"QORE_TREE_TESTED_TREE": ""},
-                      {"QORE_TREE_TESTED_TREE": "a" * 40}, {"GITHUB_ACCESS_TOKEN": ""},
+                      {"QORE_TREE_TESTED_TREE": "a" * 40},
                       {"CI_COMMIT_BRANCH": "feature"}, {"CI_PIPELINE_SOURCE": "web"},
                       {"CI_PIPELINE_SOURCE": "schedule"}, {"QORE_CI_FORCE_FULL": "1"}):
             with self.subTest(patch=patch):
@@ -353,10 +349,10 @@ class TreeTestedTest(unittest.TestCase):
         self.assertIn("FULL_JOB", output)
         self.assertIsNone(args)
 
-    def test_status_failure_runs_full(self):
-        output, args = self.run_skip(dict(self.skip_env(), STATUS_EXIT="22"))
-        self.assertIn("FULL_JOB", output)
-        self.assertIsNotNone(args)
+    def test_skip_does_not_require_status_credentials(self):
+        output, args = self.run_skip(dict(self.skip_env(), GITHUB_ACCESS_TOKEN=""))
+        self.assertNotIn("FULL_JOB", output)
+        self.assertIsNone(args)
 
 
 if __name__ == "__main__":
