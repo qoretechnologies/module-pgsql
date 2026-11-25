@@ -38,6 +38,7 @@
 #include <memory>
 #include <mutex>
 
+#include <fcntl.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <string>
@@ -493,7 +494,7 @@ static QoreListNode* pgsql_get_connect_targets(Datasource* ds, ExceptionSink* xs
     @return 0 for success, -1 if an exception was raised
 */
 static int pgsql_checked_conninfo(Datasource* ds, const QoreListNode* checked, QoreString& lstr,
-        ExceptionSink* xsink) {
+        PgsqlPinnedSockets& pinned, ExceptionSink* xsink) {
     std::vector<PgsqlTarget> targets;
     if (pgsql_get_targets(ds, targets, xsink)) {
         return -1;
@@ -532,6 +533,18 @@ static int pgsql_checked_conninfo(Datasource* ds, const QoreListNode* checked, Q
                     "changed after they were checked against the sandbox");
                 return -1;
             }
+#ifdef PGSQL_PINNED_SOCKETS
+            // the socket is pinned and connected to through a private directory, whatever its path names after the
+            // check (qore#7603)
+            {
+                std::string host;
+                if (pinned.add(ds, path.get<const QoreStringNode>()->c_str(), t.port, host, xsink)) {
+                    return -1;
+                }
+                add(host, "", t.port);
+                continue;
+            }
+#endif
             add(t.host, "", t.port);
             continue;
         }
@@ -569,11 +582,12 @@ static int qore_pgsql_open(Datasource* ds, ExceptionSink* xsink) {
 
     // string for connection arguments
     QoreString lstr;
+    PgsqlPinnedSockets pinned;
 #ifdef QDBI_METHOD_GET_CONNECT_TARGETS
     // a connection checked against a sandbox connects to the checked addresses only
     if (const QoreListNode* checked = ds->getCheckedConnectTargets()) {
         pgsql_conninfo(ds, lstr, false);
-        if (pgsql_checked_conninfo(ds, checked, lstr, xsink)) {
+        if (pgsql_checked_conninfo(ds, checked, lstr, pinned, xsink)) {
             return -1;
         }
     } else {
@@ -596,7 +610,7 @@ static int qore_pgsql_open(Datasource* ds, ExceptionSink* xsink) {
         ds->setQoreEncoding(QCS_DEFAULT);
     }
 
-    QorePGConnection* pc = new QorePGConnection(ds, lstr.c_str(), xsink);
+    QorePGConnection* pc = new QorePGConnection(ds, lstr.c_str(), xsink, std::move(pinned));
 
     if (*xsink) {
         delete pc;

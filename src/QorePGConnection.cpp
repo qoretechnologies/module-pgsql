@@ -40,6 +40,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <cerrno>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <climits>
 #include <cmath>
 #include <limits>
@@ -3823,8 +3826,140 @@ static bool pgsql_libpq_has_tcp_user_timeout() {
 #endif
 }
 
-QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink *xsink)
-        : ds(d), pc(nullptr), server_tz(currentTZ()),
+struct PgsqlPinnedSockets::Entry {
+#ifdef PGSQL_PINNED_SOCKETS
+    //! the pinned path of the socket
+    QoreDbiPinnedPath* pin = nullptr;
+    //! the O_PATH descriptor of the socket file
+    int sfd = -1;
+    //! the private directory: its parent, a descriptor of it, and its name in the parent
+    int parentfd = -1;
+    int dirfd = -1;
+    std::string name;
+    //! the name of the link in the private directory
+    std::string link;
+
+    ~Entry() {
+        if (dirfd >= 0) {
+            // the link and the directory are removed if the directory is still the one created
+            fchmod(dirfd, S_IRWXU);
+            if (!link.empty()) {
+                unlinkat(dirfd, link.c_str(), 0);
+            }
+            struct stat d, e;
+            if (parentfd >= 0 && !fstat(dirfd, &d) && !fstatat(parentfd, name.c_str(), &e, AT_SYMLINK_NOFOLLOW)
+                    && d.st_dev == e.st_dev && d.st_ino == e.st_ino) {
+                unlinkat(parentfd, name.c_str(), AT_REMOVEDIR);
+            }
+            close(dirfd);
+        }
+        if (parentfd >= 0) {
+            close(parentfd);
+        }
+        if (sfd >= 0) {
+            close(sfd);
+        }
+        qore_dbi_pinned_path_free(pin);
+    }
+#endif
+};
+
+PgsqlPinnedSockets::~PgsqlPinnedSockets() {
+    for (Entry* e : entries) {
+        delete e;
+    }
+}
+
+#ifdef PGSQL_PINNED_SOCKETS
+int PgsqlPinnedSockets::add(Datasource* ds, const char* path, const std::string& port, std::string& host,
+        ExceptionSink* xsink) {
+    std::unique_ptr<Entry> e(new Entry);
+    e->pin = qore_dbi_pin_connect_path(ds, path, QSEC_READ | QSEC_WRITE, xsink);
+    if (!e->pin) {
+        return -1;
+    }
+    if (qore_dbi_pinned_path_dirfd(e->pin) == AT_FDCWD) {
+        // not pinned: the directory given
+        host = path;
+        host.resize(host.rfind('/'));
+        entries.push_back(e.release());
+        return 0;
+    }
+    // the socket file itself, opened without following a link (O_PATH opens no file)
+    e->sfd = qore_dbi_pinned_path_open(e->pin, nullptr, O_PATH, 0);
+    struct stat sbuf;
+    bool have_stat = e->sfd >= 0 && !fstat(e->sfd, &sbuf);
+    if (!have_stat || !S_ISSOCK(sbuf.st_mode)) {
+        if (have_stat ? S_ISLNK(sbuf.st_mode) : errno == ELOOP) {
+            xsink->raiseException("FILESYSTEM-ACCESS-DENIED", "Access to '%s' denied: the path changed while it was "
+                "checked", path);
+        } else if (have_stat) {
+            xsink->raiseException("DBI:PGSQL:ERROR", "'%s' is not a UNIX socket", path);
+        } else {
+            xsink->raiseErrnoException("DBI:PGSQL:ERROR", errno, "cannot connect to the UNIX socket '%s'", path);
+        }
+        return -1;
+    }
+
+    // the private directory
+    const char* tmp = getenv("TMPDIR");
+    std::string parent = tmp && *tmp == '/' ? tmp : "/tmp";
+    std::string tmpl = parent + "/qore-pgsql-XXXXXX";
+    if (!mkdtemp(&tmpl[0])) {
+        xsink->raiseErrnoException("DBI:PGSQL:ERROR", errno, "cannot create a directory in '%s' for the UNIX socket "
+            "'%s'", parent.c_str(), path);
+        return -1;
+    }
+    e->name = tmpl.substr(parent.size() + 1);
+    e->parentfd = open(parent.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (e->parentfd >= 0) {
+        e->dirfd = openat(e->parentfd, e->name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    }
+    if (e->dirfd < 0) {
+        int err = errno;
+        rmdir(tmpl.c_str());
+        xsink->raiseErrnoException("DBI:PGSQL:ERROR", err, "cannot set up the directory '%s' for the UNIX socket "
+            "'%s'", tmpl.c_str(), path);
+        return -1;
+    }
+    // the directory opened is the one created: a directory of this user that nobody else can use (mkdtemp() creates
+    // it with the mode 0700 less the umask, which is set to 0700 here); its link count is not checked, as some file
+    // systems (btrfs) report 1 for directories
+    struct stat dbuf;
+    if (fchmod(e->dirfd, S_IRWXU) || fstat(e->dirfd, &dbuf)) {
+        xsink->raiseErrnoException("DBI:PGSQL:ERROR", errno, "cannot set up the directory '%s' for the UNIX socket "
+            "'%s'", tmpl.c_str(), path);
+        return -1;
+    }
+    if (!S_ISDIR(dbuf.st_mode) || dbuf.st_uid != geteuid() || (dbuf.st_mode & 07777) != S_IRWXU) {
+        xsink->raiseException("DBI:PGSQL:ERROR", "cannot set up the directory '%s' for the UNIX socket '%s': it "
+            "changed after it was created", tmpl.c_str(), path);
+        return -1;
+    }
+    std::string target = "/proc/self/fd/" + std::to_string(e->sfd);
+    std::string link = ".s.PGSQL." + port;
+    if (symlinkat(target.c_str(), e->dirfd, link.c_str())) {
+        xsink->raiseErrnoException("DBI:PGSQL:ERROR", errno, "cannot set up the directory '%s' for the UNIX socket "
+            "'%s'", tmpl.c_str(), path);
+        return -1;
+    }
+    e->link = link;
+    // nothing is added to or removed from the directory
+    if (fchmod(e->dirfd, S_IRUSR | S_IXUSR)) {
+        xsink->raiseErrnoException("DBI:PGSQL:ERROR", errno, "cannot set up the directory '%s' for the UNIX socket "
+            "'%s'", tmpl.c_str(), path);
+        return -1;
+    }
+    host = "/proc/self/fd/" + std::to_string(e->dirfd);
+    entries.push_back(e.get());
+    e.release();
+    return 0;
+}
+#endif
+
+QorePGConnection::QorePGConnection(Datasource* d, const char* str, ExceptionSink *xsink,
+        PgsqlPinnedSockets&& pinned)
+        : ds(d), pinned(std::move(pinned)), pc(nullptr), server_tz(currentTZ()),
             server_desc("%s:", d->getDriverName()),
             interval_has_day(false),
             integer_datetimes(false),

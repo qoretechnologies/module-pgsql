@@ -95,6 +95,15 @@ if (exists event) {
     redirect it, while TLS host name verification, \c .pgpass and GSSAPI still use the host name.  A host name with
     several addresses therefore has more weight with \c load_balance_hosts=random.
 
+    On Linux, with a %Qore version that pins the local path of a connection (\c QORE_HAS_DBI_PIN_CONNECT_PATH), a
+    UNIX socket that was checked is the one connected to, whatever its path names after the check: the socket file
+    is opened without following a symbolic link (a socket name that is then a link is refused with
+    \c FILESYSTEM-ACCESS-DENIED), and libpq, which connects to the socket <tt>.s.PGSQL.&lt;port&gt;</tt> in a
+    directory, is given a private directory (created in \c TMPDIR or \c /tmp, not writable once set up, and removed
+    when the connection is closed) whose only entry is a link to that socket, named by a \c /proc/self/fd/ path.
+    That path therefore appears in libpq's error messages, and \c .pgpass entries for the socket directory or for
+    \c localhost do not match such a connection.
+
     Pinning the connection needs libpq 12 or later; with an older libpq, code governed by a sandbox that restricts
     the network or the filesystem cannot open a connection.
 

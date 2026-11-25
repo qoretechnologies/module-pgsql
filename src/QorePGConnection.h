@@ -32,6 +32,43 @@
 #include <vector>
 #include <string>
 
+#if defined(QORE_HAS_DBI_PIN_CONNECT_PATH) && defined(__linux__)
+//! defined if the UNIX sockets of a connection that a sandbox restricts are reached through their pinned directories
+//! (qore#7603)
+#define PGSQL_PINNED_SOCKETS 1
+#endif
+
+//! the pinned UNIX sockets of a connection, which libpq reaches through private directories (qore#7603)
+/** libpq connects to the socket \c .s.PGSQL.<port> in the directory that it is given; each pinned socket is
+    therefore given to it as a private directory (created with mkdtemp(), not writable once set up) whose only entry,
+    \c .s.PGSQL.<port>, is a link to the procfs path of an \c O_PATH descriptor of the socket file checked, and the
+    directory is named by the procfs path of a descriptor of it.  They are kept for the life of the connection, as
+    libpq connects again with the same host list (PQreset()).
+*/
+class PgsqlPinnedSockets {
+public:
+    DLLLOCAL PgsqlPinnedSockets() = default;
+    DLLLOCAL PgsqlPinnedSockets(const PgsqlPinnedSockets&) = delete;
+    DLLLOCAL PgsqlPinnedSockets& operator=(const PgsqlPinnedSockets&) = delete;
+    DLLLOCAL PgsqlPinnedSockets(PgsqlPinnedSockets&& old) noexcept : entries(std::move(old.entries)) {
+        old.entries.clear();
+    }
+
+    DLLLOCAL ~PgsqlPinnedSockets();
+
+#ifdef PGSQL_PINNED_SOCKETS
+    //! pins the checked socket \a path for libpq's \a port and returns the directory to give libpq in \a host
+    /** @return 0 for success, -1 if an exception was raised
+    */
+    DLLLOCAL int add(Datasource* ds, const char* path, const std::string& port, std::string& host,
+            ExceptionSink* xsink);
+#endif
+
+private:
+    struct Entry;
+    std::vector<Entry*> entries;
+};
+
 typedef std::vector<std::string> strvec_t;
 
 class QoreColumnarResult;
@@ -507,6 +544,9 @@ private:
 class QorePGConnection {
 protected:
     Datasource* ds;
+    //! the pinned UNIX socket directories that the connection string names; declared before pc and released after
+    //! the connection is closed (in the destructor)
+    PgsqlPinnedSockets pinned;
     PGconn* pc;
     const AbstractQoreZoneInfo* server_tz;
     // short server description without password for error / warning messages
@@ -559,7 +599,8 @@ protected:
 #endif
 
 public:
-    DLLLOCAL QorePGConnection(Datasource* d, const char *str, ExceptionSink *xsink);
+    DLLLOCAL QorePGConnection(Datasource* d, const char *str, ExceptionSink *xsink,
+        PgsqlPinnedSockets&& pinned = PgsqlPinnedSockets());
     DLLLOCAL ~QorePGConnection();
 
     DLLLOCAL int commit(ExceptionSink *xsink);
