@@ -2901,8 +2901,17 @@ int QorePgsqlStatement::add(QoreValue v_arg, ExceptionSink *xsink) {
                     break;
 
                 case NT_LIST: {
-                    std::unique_ptr<QorePGBindArray> ba(new QorePGBindArray(conn));
                     const QoreListNode* l = t.get<const QoreListNode>();
+                    if (l->empty()) {
+                        // No element OID to infer. Let the SQL context type the empty array literal.
+                        static char empty_array[] = "{}";
+                        paramTypes[nParams] = 0;
+                        paramValues[nParams] = empty_array;
+                        paramLengths[nParams] = sizeof(empty_array) - 1;
+                        paramFormats[nParams] = 0;
+                        break;
+                    }
+                    std::unique_ptr<QorePGBindArray> ba(new QorePGBindArray(conn));
                     if (ba->create_data(l, 0, enc, xsink))
                         return -1;
 

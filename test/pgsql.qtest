@@ -875,6 +875,13 @@ class PgsqlTest inherits QUnit::Test {
         Datasource db(connstr);
         on_exit db.rollback();
 
+        # An empty array has no element from which to infer its type. Let the target column supply it.
+        db.exec("insert into array_test (int_arr, bool_arr, text_arr) values (%v, %v, %v)",
+            pgsql_bind_array(()), pgsql_bind_array((True, False)), pgsql_bind_array(NOTHING));
+        assertEq({"int_arr": (), "bool_arr": (True, False), "text_arr": NULL},
+            db.selectRow("select int_arr, bool_arr, text_arr from array_test order by id desc limit 1"));
+        db.exec("delete from array_test where cardinality(int_arr) = 0");
+
         # Test integer array binding
         list<int> intArr = (1, 2, 3, 4, 5);
         db.exec("insert into array_test (int_arr) values (%v)", pgsql_bind_array(intArr));
