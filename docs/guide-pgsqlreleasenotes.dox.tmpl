@@ -36,6 +36,7 @@
       a silent first host no longer prevents a connection to a healthy later host. Each selected
       endpoint receives its own timeout; authentication failures still stop immediately, and
       cancellation remains effective while connecting. This also applies when reopening a connection
+    - @ref pgsql_bind_array() binds an empty list using the array type that the SQL statement expects
     - empty PostgreSQL arrays are returned as empty lists reliably; reading an empty array
       could previously cause excessive memory use or terminate the process
     - a connection attempt ends as soon as its thread is cancelled or its %Qore \c Program is interrupted

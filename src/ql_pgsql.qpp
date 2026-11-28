@@ -448,7 +448,9 @@ hash pgsql_bind(softint type, auto value) [flags=RET_VALUE_ONLY,NAMED_ARGS] {
 }
 
 //! Creates a data structure understood by the pgsql DBI driver when binding array values in SQL queries
-/** @param value the list to bind as an array
+/** An empty list binds as an empty array of the type expected by the SQL statement; NOTHING binds as SQL NULL.
+
+    @param value the list to bind as an array
 
     @return A hash that allows the value to be bound as an array
 
